@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://ventas-ia-backend-free.onrender.com/api/:path*"
+    },
+    {
+      "source": "/webhooks/:path*",
+      "destination": "https://ventas-ia-backend-free.onrender.com/webhooks/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://ventas-ia-backend-free.onrender.com/health"
+    }
+  ]
+}
