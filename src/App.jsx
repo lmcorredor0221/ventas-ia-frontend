@@ -8,6 +8,8 @@ import {
   Bot,
   Building2,
   Check,
+  ChevronDown,
+  ChevronUp,
   CircleDollarSign,
   Clock3,
   Database,
@@ -22,6 +24,7 @@ import {
   Lock,
   MessageCircle,
   MessageSquareText,
+  Move,
   PanelLeftClose,
   PanelLeftOpen,
   Pause,
@@ -37,9 +40,12 @@ import {
   UserCheck,
   Users,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   conversations,
+  createConversationLoadFixture,
   eventTemplates,
   metricSeed,
   pendingRequests,
@@ -106,23 +112,212 @@ const viewHeader = {
 };
 
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
-
-function apiUrl(input) {
-  if (typeof input !== 'string' || !apiBaseUrl) return input;
-  if (input.startsWith('/api') || input.startsWith('/webhooks') || input.startsWith('/health')) return `${apiBaseUrl}${input}`;
-  return input;
-}
-
-function appFetch(input, init) {
-  return fetch(apiUrl(input), init);
-}
+const loadFixtureSize = typeof window !== 'undefined'
+  ? Number(new URLSearchParams(window.location.search).get('loadFixture') ?? 0)
+  : 0;
+const initialConversations = loadFixtureSize ? createConversationLoadFixture(loadFixtureSize) : conversations;
 
 function zoneCenter(zoneId) {
   const zone = storeZones.find((item) => item.id === zoneId) ?? storeZones[0];
   return {
     x: zone.x + zone.w / 2,
     y: zone.y + zone.h / 2,
+  };
+}
+
+const semanticStageZone = {
+  catalog: 'catalog',
+  approval: 'approval',
+  handoff: 'approval',
+  binding: 'catalog',
+  payment: 'payment',
+  off_hours: 'observability',
+  quote: 'quote',
+};
+
+const semanticToolZone = {
+  approval_gate: 'approval',
+  human_handoff: 'approval',
+  transactional_write: 'payment',
+  google_sheets_read_table: 'catalog',
+  google_drive_file_picker: 'drive',
+  google_sheets_customer_profile_lookup: 'drive',
+  google_sheets_customer_profile_upsert: 'drive',
+  google_sheets_order_write: 'payment',
+  whatsapp_business_messaging: 'whatsapp',
+  scheduler: 'observability',
+  planner: 'agent',
+};
+
+function eventZoneForConversation(event, conversation) {
+  if (!event) return null;
+  const type = String(event.type ?? '');
+  if (type.includes('human_handoff')) return 'approval';
+  if (type.includes('failed') || type.includes('error')) return 'observability';
+  if (type.includes('binding')) return 'catalog';
+  if (type.includes('approval') || type.includes('decision')) {
+    if (type === 'approval.granted' && conversation?.stage && semanticStageZone[conversation.stage]) {
+      return semanticStageZone[conversation.stage];
+    }
+    return 'approval';
+  }
+  if (type.includes('fallback')) return 'observability';
+  if (type === 'agent.started') return 'agent';
+  if (type === 'agent.completed') return semanticStageZone[conversation?.stage] ?? 'payment';
+  if (type.startsWith('tool.call')) {
+    return semanticToolZone[conversation?.lastTool] ?? semanticStageZone[conversation?.stage] ?? 'agent';
+  }
+  return null;
+}
+
+const priorityEventTypes = new Set([
+  'approval.requested',
+  'decision.requested',
+  'fallback.activated',
+  'agent.failed',
+  'human_handoff',
+  'tool.binding.changed',
+]);
+
+function isPriorityMapEvent(event) {
+  const type = String(event?.type ?? '');
+  return priorityEventTypes.has(type)
+    || type.includes('failed')
+    || type.includes('error')
+    || type.includes('human_handoff');
+}
+
+function semanticZoneForConversation(conversation, pendingIds, latestEvent) {
+  if (pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)) {
+    return {
+      zone: 'approval',
+      source: `Estado: ${statusLabel[conversation.status] ?? conversation.status}`,
+    };
+  }
+  const eventZone = eventZoneForConversation(latestEvent, conversation);
+  if (eventZone) {
+    return {
+      zone: eventZone,
+      source: `Evento: ${eventTypeLabel(latestEvent.type)}`,
+    };
+  }
+  if (semanticStageZone[conversation.stage]) {
+    return {
+      zone: semanticStageZone[conversation.stage],
+      source: `Etapa: ${stageLabel(conversation.stage)}`,
+    };
+  }
+  if (semanticToolZone[conversation.lastTool]) {
+    return {
+      zone: semanticToolZone[conversation.lastTool],
+      source: `Herramienta: ${toolLabel(conversation.lastTool)}`,
+    };
+  }
+  const path = Array.isArray(conversation.path) && conversation.path.length ? conversation.path : ['agent'];
+  return {
+    zone: path[Math.max(0, path.length - 1)],
+    source: 'Ruta operativa configurada',
+  };
+}
+
+function prioritySignalForStore(events, conversationItems, pendingIds, requestItems = []) {
+  const conversationsById = new Map(conversationItems.map((conversation) => [conversation.id, conversation]));
+  const requestsByConversationId = new Map(requestItems.map((request) => [request.conversationId, request]));
+  const requestsById = new Map(requestItems.map((request) => [request.id, request]));
+  const priorityEvent = events.find((event) => {
+    const conversation = conversationsById.get(event?.conversationId);
+    return conversation && isPriorityMapEvent(event);
+  });
+  if (priorityEvent) {
+    const conversation = conversationsById.get(priorityEvent.conversationId);
+    const request = requestsById.get(priorityEvent.metadata?.requestId) ?? requestsByConversationId.get(priorityEvent.conversationId);
+    const semanticZone = semanticZoneForConversation(conversation, pendingIds, priorityEvent);
+    const needsHuman = ['approval', 'approval_required', 'blocked'].includes(semanticZone.zone)
+      || String(priorityEvent.type).includes('approval')
+      || String(priorityEvent.type).includes('decision')
+      || String(priorityEvent.type).includes('human_handoff');
+    return {
+      id: priorityEvent.id,
+      zone: semanticZone.zone,
+      conversation,
+      title: eventTypeLabel(priorityEvent.type),
+      detail: priorityEvent.detail || conversation.nextStep || conversation.need,
+      request,
+      actionLabel: request ? 'Abrir decisión' : needsHuman ? 'Ver caso crítico' : 'Ver caso',
+      needsHuman,
+      source: 'event',
+    };
+  }
+
+  const criticalConversation = conversationItems.find((conversation) => (
+    pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)
+  ));
+  if (!criticalConversation) return null;
+  const semanticZone = semanticZoneForConversation(criticalConversation, pendingIds, null);
+  const request = requestsByConversationId.get(criticalConversation.id);
+  return {
+    id: `status-${criticalConversation.id}-${criticalConversation.status}`,
+    zone: semanticZone.zone,
+    conversation: criticalConversation,
+    title: statusLabel[criticalConversation.status] ?? 'Atencion requerida',
+    detail: criticalConversation.humanReason || criticalConversation.nextStep || criticalConversation.need,
+    request,
+    actionLabel: request ? 'Abrir decisión' : 'Ver caso crítico',
+    needsHuman: true,
+    source: 'status',
+  };
+}
+
+function stableAvatarOffset(id, index = 0) {
+  const seed = Array.from(String(id)).reduce((sum, char) => sum + char.charCodeAt(0), index * 17);
+  return {
+    x: ((seed % 5) - 2) * 7,
+    y: (((Math.floor(seed / 5) % 5) - 2) * 5),
+  };
+}
+
+function conversationBelongsToZone(conversation, zoneId, pendingIds) {
+  if (zoneId === 'approval') {
+    return pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status);
+  }
+  const path = Array.isArray(conversation.path) ? conversation.path : [];
+  return path.includes(zoneId) || conversation.stage === zoneId;
+}
+
+function zoneRiskLabel(conversationItems, pendingIds) {
+  const criticalCount = conversationItems.filter((conversation) => (
+    pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)
+  )).length;
+  if (criticalCount) return `${criticalCount} requieren apoyo`;
+  const liveCount = conversationItems.filter((conversation) => ['live', 'degraded'].includes(conversation.status)).length;
+  if (liveCount) return `${liveCount} activos`;
+  return 'Sin riesgo visible';
+}
+
+function zoneForGrouping(conversation, pendingIds) {
+  if (pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)) return 'approval';
+  if (conversation.zone) return conversation.zone;
+  const path = Array.isArray(conversation.path) && conversation.path.length ? conversation.path : ['agent'];
+  return path[Math.max(0, path.length - 1)];
+}
+
+function uniqueConversations(conversationItems) {
+  const seen = new Set();
+  return conversationItems.filter((conversation) => {
+    if (!conversation || seen.has(conversation.id)) return false;
+    seen.add(conversation.id);
+    return true;
+  });
+}
+
+function pointerDistance(left, right) {
+  return Math.hypot(right.x - left.x, right.y - left.y);
+}
+
+function pointerCenter(left, right) {
+  return {
+    x: (left.x + right.x) / 2,
+    y: (left.y + right.y) / 2,
   };
 }
 
@@ -154,24 +349,36 @@ function csrfHeaders(auth) {
   return token ? { 'x-csrf-token': token } : {};
 }
 
+function firstActiveTenantId(auth) {
+  return auth?.memberships?.find((item) => item.status === 'active')?.tenantId ?? auth?.memberships?.[0]?.tenantId ?? '';
+}
+
+function canAccessPlatformAdmin(auth) {
+  return Boolean(auth?.isPlatformAdmin || auth?.user?.platformRole === 'platform_admin');
+}
+
 function App() {
   const [tenantList, setTenantList] = useState(tenants);
   const [toolList, setToolList] = useState(tools);
-  const [conversationList, setConversationList] = useState(conversations);
+  const [conversationList, setConversationList] = useState(initialConversations);
   const [backendStatus, setBackendStatus] = useState('connecting');
   const [tenantId, setTenantId] = useState(tenants[0].id);
   const [activeView, setActiveView] = useState('summary');
-  const [selectedId, setSelectedId] = useState(conversations[0].id);
+  const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? conversations[0].id);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationQuery, setConversationQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [isPlaying, setIsPlaying] = useState(true);
-  const [tick, setTick] = useState(0);
   const [events, setEvents] = useState(() =>
     conversations.slice(0, 5).map((conversation, index) => createEvent(index, conversation.tenantId, conversation)),
   );
   const [requests, setRequests] = useState(pendingRequests);
   const [draftReply, setDraftReply] = useState('Producto identificado. Continuar con cotización preliminar.');
+  const [humanReplyMode, setHumanReplyMode] = useState('whatsapp');
+  const [conversationDetailCollapsed, setConversationDetailCollapsed] = useState(false);
+  const [mobileConversationOpen, setMobileConversationOpen] = useState(false);
+  const [conversationWorkspaceTab, setConversationWorkspaceTab] = useState('list');
+  const [conversationTab, setConversationTab] = useState('chat');
   const [auth, setAuth] = useState(null);
   const [authStatus, setAuthStatus] = useState('checking');
   const [authRequired, setAuthRequired] = useState(false);
@@ -184,7 +391,8 @@ function App() {
   const [adminError, setAdminError] = useState('');
   const [billingStatus, setBillingStatus] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [storeCaseOpen, setStoreCaseOpen] = useState(false);
+  const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
+  const conversationSearchRef = useRef(null);
 
   const tenant = tenantList.find((item) => item.id === tenantId) ?? tenantList[0] ?? tenants[0];
   const visibleConversations = conversationList.filter((item) => item.tenantId === tenantId);
@@ -194,15 +402,21 @@ function App() {
   const visibleEvents = events.filter((item) => item.tenantId === tenantId).slice(0, 9);
   const pendingIds = useMemo(() => new Set(visibleRequests.map((item) => item.conversationId)), [visibleRequests]);
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
+  const isPlatformAdmin = canAccessPlatformAdmin(auth);
+  const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
 
   useEffect(() => {
     let cancelled = false;
     async function loadSession() {
       try {
-        const response = await appFetch('/api/auth/me', { credentials: 'include' });
+        const response = await fetch('/api/auth/me', { credentials: 'include' });
         if (!response.ok) {
           if (!cancelled) {
             setAuth(null);
+            if (response.status === 401) {
+              setAuthRequired(true);
+              setBackendStatus('auth_required');
+            }
             setAuthStatus('guest');
           }
           return;
@@ -229,15 +443,22 @@ function App() {
     let cancelled = false;
 
     async function loadOverview() {
+      if (authStatus === 'checking') return;
+      if (authStatus === 'guest' && authRequired) return;
+      const effectiveTenantId = sessionTenantId || tenantId;
+      if (sessionTenantId && tenantId !== sessionTenantId) {
+        setTenantId(sessionTenantId);
+        return;
+      }
       try {
-        const response = await appFetch(`/api/ops/overview?tenantId=${encodeURIComponent(tenantId)}`, { credentials: 'include' });
+        const response = await fetch(`/api/ops/overview?tenantId=${encodeURIComponent(effectiveTenantId)}`, { credentials: 'include' });
         if (response.status === 401) {
           setAuthRequired(true);
           setBackendStatus('auth_required');
           return;
         }
-        if (response.status === 403 && auth?.memberships?.[0]?.tenantId) {
-          setTenantId(auth.memberships[0].tenantId);
+        if (response.status === 403 && firstActiveTenantId(auth)) {
+          setTenantId(firstActiveTenantId(auth));
           return;
         }
         if (!response.ok) throw new Error(`Backend ${response.status}`);
@@ -245,34 +466,39 @@ function App() {
         if (cancelled) return;
         setTenantList(overview.tenants?.length ? overview.tenants : tenants);
         setToolList(overview.tools?.length ? overview.tools : tools);
-        setConversationList(overview.conversations?.length ? overview.conversations : conversations);
+        if (!loadFixtureSize) setConversationList(overview.conversations?.length ? overview.conversations : conversations);
         setRequests(overview.pendingRequests ?? []);
         setEvents(overview.events ?? []);
-        setUsageSummary(overview.usage ?? defaultUsageSummary(tenantId));
-        const statusResponse = await appFetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
+        setUsageSummary(overview.usage ?? defaultUsageSummary(effectiveTenantId));
+        const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(effectiveTenantId)}/status`, { credentials: 'include' });
         if (!cancelled && statusResponse.ok) {
           setOnboardingBundle(await statusResponse.json());
         } else if (!cancelled) {
           setOnboardingBundle(null);
         }
-        const billingResponse = await appFetch(`/api/billing/status?tenantId=${encodeURIComponent(tenantId)}`, { credentials: 'include' });
+        const billingResponse = await fetch(`/api/billing/status?tenantId=${encodeURIComponent(effectiveTenantId)}`, { credentials: 'include' });
         if (!cancelled && billingResponse.ok) {
           setBillingStatus(await billingResponse.json());
         } else if (!cancelled) {
           setBillingStatus(null);
         }
-        const adminResponse = await appFetch('/api/admin/overview', { credentials: 'include' });
-        if (!cancelled && adminResponse.ok) {
-          setAdminOverview(await adminResponse.json());
-          setAdminError('');
-        } else if (!cancelled && adminResponse.status !== 403 && adminResponse.status !== 401) {
+        if (isPlatformAdmin) {
+          const adminResponse = await fetch('/api/admin/overview', { credentials: 'include' });
+          if (!cancelled && adminResponse.ok) {
+            setAdminOverview(await adminResponse.json());
+            setAdminError('');
+          } else if (!cancelled && adminResponse.status !== 403 && adminResponse.status !== 401 && adminResponse.status !== 404) {
+            setAdminOverview(null);
+            setAdminError(`Admin ${adminResponse.status}`);
+          }
+        } else {
           setAdminOverview(null);
-          setAdminError(`Admin ${adminResponse.status}`);
+          setAdminError('');
         }
         setBackendStatus('connected');
       } catch {
         if (!cancelled) {
-          setUsageSummary(defaultUsageSummary(tenantId));
+          setUsageSummary(defaultUsageSummary(effectiveTenantId));
           setOnboardingBundle(null);
           setBillingStatus(null);
           setAdminOverview(null);
@@ -287,7 +513,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [tenantId, auth, refreshKey]);
+  }, [tenantId, auth, authRequired, authStatus, isPlatformAdmin, refreshKey, sessionTenantId]);
 
   useEffect(() => {
     if (!visibleConversations.find((item) => item.id === selectedId) && visibleConversations[0]) {
@@ -298,7 +524,6 @@ function App() {
   useEffect(() => {
     if (!isPlaying) return undefined;
     const timer = window.setInterval(() => {
-      setTick((value) => value + 1);
       setEvents((current) => {
         const pool = conversationList.filter((item) => item.tenantId === tenantId);
         const conversation = pool[Math.floor(Math.random() * Math.max(pool.length, 1))];
@@ -339,12 +564,51 @@ function App() {
   function focusConversation(id, nextView = activeView) {
     setSelectedId(id);
     setActiveView(nextView);
-    if (nextView === 'store') setStoreCaseOpen(true);
+  }
+
+  function openWhatsAppConversation(id) {
+    focusConversation(id, 'conversations');
+    setConversationWorkspaceTab('detail');
+    setMobileConversationOpen(true);
+  }
+
+  useEffect(() => {
+    if (activeView !== 'conversations') return undefined;
+    function handleConversationKeys(event) {
+      const tagName = event.target?.tagName?.toLowerCase();
+      const isTyping = ['input', 'select', 'textarea'].includes(tagName) || event.target?.isContentEditable;
+      if (event.key === '/' && !isTyping) {
+        event.preventDefault();
+        setConversationWorkspaceTab('list');
+        conversationSearchRef.current?.focus();
+        return;
+      }
+      if (isTyping || !filteredConversations.length) return;
+      const currentIndex = Math.max(0, filteredConversations.findIndex((item) => item.id === selectedConversation?.id));
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        const nextIndex = (currentIndex + delta + filteredConversations.length) % filteredConversations.length;
+        setSelectedId(filteredConversations[nextIndex].id);
+      }
+      if (event.key === 'Enter' && selectedConversation?.id) {
+        event.preventDefault();
+        setConversationWorkspaceTab('detail');
+        setMobileConversationOpen(true);
+      }
+    }
+    window.addEventListener('keydown', handleConversationKeys);
+    return () => window.removeEventListener('keydown', handleConversationKeys);
+  }, [activeView, filteredConversations, selectedConversation?.id]);
+
+  function openApprovals(requestId = '') {
+    setSelectedHumanRequestId(requestId);
+    setActiveView('approvals');
   }
 
   async function updateTenantConfig(configPatch) {
     try {
-      const response = await appFetch(`/api/tenants/${encodeURIComponent(tenantId)}/config`, {
+      const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/config`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
         credentials: 'include',
@@ -382,7 +646,7 @@ function App() {
     setOnboardingBusy(action);
     try {
       if (action === 'google-oauth') {
-        const response = await appFetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start`, { credentials: 'include' });
+        const response = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start`, { credentials: 'include' });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error ?? `OAuth ${response.status}`);
         if (result.authorizationUrl) window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer');
@@ -391,7 +655,7 @@ function App() {
         const body = ['billing-checkout', 'billing-continue', 'billing-cancel'].includes(action)
           ? { tenantId, payerEmail: tenant.lifecycle?.ownerEmail, reason: action === 'billing-cancel' ? 'owner_requested' : undefined }
           : {};
-        const response = await appFetch(postRoutes[action], {
+        const response = await fetch(postRoutes[action], {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
           credentials: 'include',
@@ -422,7 +686,7 @@ function App() {
     setOnboardingBusy(`whatsapp-${action}`);
     try {
       if (!routes[action]) throw new Error(`Acción WhatsApp no configurada: ${action}`);
-      const response = await appFetch(routes[action], {
+      const response = await fetch(routes[action], {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
         credentials: 'include',
@@ -434,7 +698,7 @@ function App() {
         window.open(result.launch.authorizationUrl, '_blank', 'noopener,noreferrer');
       }
       setRefreshKey((value) => value + 1);
-      const statusResponse = await appFetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
+      const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
       if (statusResponse.ok) setOnboardingBundle(await statusResponse.json());
       return result;
     } catch (error) {
@@ -447,8 +711,12 @@ function App() {
 
   async function updatePlatformSettings(settingsPatch) {
     setAdminError('');
+    if (!isPlatformAdmin) {
+      setAdminError('Esta consola requiere rol de administrador de plataforma.');
+      return;
+    }
     try {
-      const response = await appFetch('/api/admin/settings', {
+      const response = await fetch('/api/admin/settings', {
         method: 'PATCH',
         headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
         credentials: 'include',
@@ -462,17 +730,20 @@ function App() {
     }
   }
 
-  async function resolveRequest(id, outcome) {
+  async function resolveRequest(id, outcome, options = {}) {
     const request = requests.find((item) => item.id === id);
+    const note = options.note ?? draftReply;
+    const responseMode = options.responseMode ?? 'none';
+    if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
     try {
       if (backendStatus === 'connected') {
-        await appFetch(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, {
+        await fetch(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
           credentials: 'include',
-          body: JSON.stringify({ outcome, note: draftReply, approverId: 'micro-app-user' }),
+          body: JSON.stringify({ outcome, note, responseMode, approverId: 'micro-app-user' }),
         });
-        const response = await appFetch(`/api/ops/overview?tenantId=${encodeURIComponent(tenantId)}`, { credentials: 'include' });
+        const response = await fetch(`/api/ops/overview?tenantId=${encodeURIComponent(tenantId)}`, { credentials: 'include' });
         const overview = await response.json();
         setConversationList(overview.conversations ?? conversationList);
         setRequests(overview.pendingRequests ?? []);
@@ -501,7 +772,7 @@ function App() {
     setAuthStatus('checking');
     setAuthError('');
     try {
-      const response = await appFetch('/api/auth/google', {
+      const response = await fetch('/api/auth/google', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         credentials: 'include',
@@ -520,7 +791,7 @@ function App() {
     setAuthStatus('checking');
     setAuthError('');
     try {
-      const response = await appFetch('/api/auth/google', {
+      const response = await fetch('/api/auth/google', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         credentials: 'include',
@@ -551,7 +822,7 @@ function App() {
   }
 
   async function handleLogout() {
-    await appFetch('/api/auth/logout', {
+    await fetch('/api/auth/logout', {
       method: 'POST',
       credentials: 'include',
       headers: csrfHeaders(auth),
@@ -631,7 +902,7 @@ function App() {
         </div>
       </aside>
 
-      <section className={`workspace ${activeView === 'store' ? 'workspace-compact' : ''}`}>
+      <section className={`workspace ${activeView === 'store' ? 'workspace-compact' : ''} ${activeView === 'conversations' && mobileConversationOpen ? 'mobile-conversation-detail' : ''}`}>
         <header className="topbar">
           <div>
             <span className="eyebrow">{headerEyebrow}</span>
@@ -647,7 +918,7 @@ function App() {
                 value={conversationQuery}
               />
             </label>
-            <button className="icon-btn" type="button" title={`${visibleRequests.length} aprobaciones pendientes`}>
+            <button className="icon-btn" type="button" title={`${visibleRequests.length} aprobaciones pendientes`} onClick={() => openApprovals()}>
               <Bell size={18} />
               {visibleRequests.length > 0 && <span>{visibleRequests.length}</span>}
             </button>
@@ -693,39 +964,47 @@ function App() {
           <section className="main-grid store-grid-full">
             <StoreMap
               conversations={visibleConversations}
+              events={visibleEvents}
               selectedId={selectedConversation?.id}
-              onOpenList={() => setActiveView('conversations')}
+              onOpenApprovals={openApprovals}
+              onOpenList={() => {
+                setConversationWorkspaceTab('list');
+                setActiveView('conversations');
+              }}
               onReset={() => {
                 setSelectedId(visibleConversations[0]?.id);
-                setStoreCaseOpen(false);
               }}
-              onSelect={(id) => focusConversation(id, 'store')}
-              tick={tick}
+              onSelect={openWhatsAppConversation}
               pendingIds={pendingIds}
+              requests={visibleRequests}
             />
-            {storeCaseOpen && selectedConversation && (
-              <ConversationPanel
-                conversation={selectedConversation}
-                events={visibleEvents}
-                onClose={() => setStoreCaseOpen(false)}
-                onOpenApprovals={() => setActiveView('approvals')}
-                onOpenList={() => setActiveView('conversations')}
-                pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation.id)}
-              />
-            )}
           </section>
         )}
 
         {activeView === 'conversations' && (
           <ConversationsView
+            backendStatus={backendStatus}
             conversations={filteredConversations}
+            detailCollapsed={conversationDetailCollapsed}
             events={visibleEvents}
-            onSelectConversation={(id) => focusConversation(id, 'store')}
+            onSelectConversation={openWhatsAppConversation}
+            onOpenApprovals={openApprovals}
+            onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
+            pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation?.id)}
             query={conversationQuery}
+            searchInputRef={conversationSearchRef}
+            selectedConversation={selectedConversation}
             selectedId={selectedConversation?.id}
             setQuery={setConversationQuery}
             setStatusFilter={setStatusFilter}
             statusFilter={statusFilter}
+            workspaceTab={conversationWorkspaceTab}
+            setWorkspaceTab={setConversationWorkspaceTab}
+            mobileDetailOpen={mobileConversationOpen}
+            onOpenMobileDetail={() => setMobileConversationOpen(true)}
+            onCloseMobileDetail={() => setMobileConversationOpen(false)}
+            tab={conversationTab}
+            setTab={setConversationTab}
           />
         )}
 
@@ -733,10 +1012,13 @@ function App() {
           <HumanQueue
             requests={visibleRequests}
             conversations={visibleConversations}
-            onSelectConversation={(id) => focusConversation(id, 'store')}
+            onSelectConversation={openWhatsAppConversation}
             onResolve={resolveRequest}
             draftReply={draftReply}
             setDraftReply={setDraftReply}
+            replyMode={humanReplyMode}
+            setReplyMode={setHumanReplyMode}
+            selectedRequestId={selectedHumanRequestId}
           />
         )}
 
@@ -754,17 +1036,22 @@ function App() {
         )}
 
         {activeView === 'admin' && (
-          <PlatformAdminView
-            auth={auth}
-            error={adminError}
-            overview={adminOverview}
-            onSaveSettings={updatePlatformSettings}
-            onOpenObservability={() => setActiveView('observability')}
-          />
+          isPlatformAdmin ? (
+            <PlatformAdminView
+              auth={auth}
+              error={adminError}
+              overview={adminOverview}
+              onSaveSettings={updatePlatformSettings}
+              onRefresh={() => setRefreshKey((value) => value + 1)}
+              onOpenObservability={() => setActiveView('observability')}
+            />
+          ) : (
+            <RestrictedAdminPanel />
+          )
         )}
 
         {activeView === 'observability' && (
-          <ObservabilityView overview={adminOverview} />
+          isPlatformAdmin ? <ObservabilityView overview={adminOverview} /> : <RestrictedAdminPanel />
         )}
 
         {activeView === 'analytics' && (
@@ -871,6 +1158,7 @@ function usageTone(percent) {
 }
 
 function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin }) {
+  const showSandboxLogin = !googleClientId;
   return (
     <main className="auth-shell">
       <section className="auth-panel">
@@ -881,10 +1169,12 @@ function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin })
         <h1>Acceso seguro al centro multicliente</h1>
         <p>Inicia sesión con Google para ver únicamente las tiendas donde tienes membresía activa.</p>
         <GoogleSignInButton onCredential={onGoogleCredential} />
-        <button className="ghost-btn auth-dev-btn" type="button" onClick={onSandboxLogin} disabled={authStatus === 'checking'}>
-          <ShieldCheck size={17} />
-          Usar acceso local de desarrollo
-        </button>
+        {showSandboxLogin && (
+          <button className="ghost-btn auth-dev-btn" type="button" onClick={onSandboxLogin} disabled={authStatus === 'checking'}>
+            <ShieldCheck size={17} />
+            Usar acceso local de desarrollo
+          </button>
+        )}
         {authError && (
           <div className="auth-error">
             <AlertTriangle size={17} />
@@ -897,6 +1187,7 @@ function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin })
 }
 
 function AuthBadge({ auth, authStatus, onGoogleCredential, onLogout, onSandboxLogin }) {
+  const showSandboxLogin = !googleClientId;
   if (auth?.user) {
     return (
       <div className="auth-badge">
@@ -914,17 +1205,24 @@ function AuthBadge({ auth, authStatus, onGoogleCredential, onLogout, onSandboxLo
   return (
     <div className="auth-actions-inline">
       <GoogleSignInButton compact onCredential={onGoogleCredential} />
-      <button className="ghost-btn compact" type="button" onClick={onSandboxLogin} disabled={authStatus === 'checking'}>
-        <ShieldCheck size={15} />
-        Dev
-      </button>
+      {showSandboxLogin && (
+        <button className="ghost-btn compact" type="button" onClick={onSandboxLogin} disabled={authStatus === 'checking'}>
+          <ShieldCheck size={15} />
+          Dev
+        </button>
+      )}
     </div>
   );
 }
 
 function GoogleSignInButton({ compact = false, onCredential }) {
   const containerRef = useRef(null);
+  const onCredentialRef = useRef(onCredential);
   const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    onCredentialRef.current = onCredential;
+  }, [onCredential]);
 
   useEffect(() => {
     if (!googleClientId) return undefined;
@@ -957,7 +1255,7 @@ function GoogleSignInButton({ compact = false, onCredential }) {
     containerRef.current.innerHTML = '';
     window.google.accounts.id.initialize({
       client_id: googleClientId,
-      callback: (response) => onCredential(response.credential),
+      callback: (response) => onCredentialRef.current(response.credential),
     });
     window.google.accounts.id.renderButton(containerRef.current, {
       theme: 'outline',
@@ -966,7 +1264,7 @@ function GoogleSignInButton({ compact = false, onCredential }) {
       shape: 'rectangular',
       width: compact ? 150 : 260,
     });
-  }, [compact, onCredential, ready]);
+  }, [compact, ready]);
 
   if (!googleClientId) {
     return (
@@ -1047,22 +1345,99 @@ function getCharacterMood(conversation, pendingIds) {
   return 'talking';
 }
 
+function getOperationalPose(conversation, pendingIds, latestEvent) {
+  const eventType = String(latestEvent?.type ?? '');
+  const tool = String(conversation.lastTool ?? '');
+  if (
+    pendingIds.has(conversation.id)
+    || conversation.status === 'approval_required'
+    || eventType.includes('decision')
+    || eventType.includes('approval')
+    || eventType.includes('human_handoff')
+  ) {
+    return {
+      state: 'human',
+      label: 'Decidir',
+      reason: 'Requiere criterio humano',
+      icon: UserCheck,
+    };
+  }
+  if (
+    ['blocked', 'degraded', 'needs_binding', 'fallback_available'].includes(conversation.status)
+    || eventType.includes('failed')
+    || eventType.includes('error')
+    || eventType.includes('fallback')
+  ) {
+    return {
+      state: 'blocked',
+      label: 'Revisar',
+      reason: 'Hay bloqueo o conexion pendiente',
+      icon: AlertTriangle,
+    };
+  }
+  if (
+    conversation.stage === 'catalog'
+    || tool.includes('read_table')
+    || tool.includes('catalog')
+    || eventType.startsWith('tool.call')
+  ) {
+    return {
+      state: 'searching',
+      label: 'Buscando',
+      reason: 'Consulta catalogo o soporte',
+      icon: Search,
+    };
+  }
+  if (conversation.stage === 'quote' || conversation.stage === 'drive' || tool.includes('profile')) {
+    return {
+      state: 'basket',
+      label: 'Canasta',
+      reason: 'Construye pedido o valida cliente',
+      icon: ShoppingBag,
+    };
+  }
+  if (conversation.stage === 'payment' || tool.includes('order_write') || tool.includes('transactional')) {
+    return {
+      state: 'checkout',
+      label: 'Caja',
+      reason: 'Registra pedido o pago',
+      icon: CircleDollarSign,
+    };
+  }
+  if (conversation.stage === 'whatsapp' || eventType.includes('message')) {
+    return {
+      state: 'message',
+      label: 'Mensaje',
+      reason: 'Conversacion entrante',
+      icon: MessageCircle,
+    };
+  }
+  return {
+    state: 'working',
+    label: 'IA',
+    reason: 'Agente procesando la conversacion',
+    icon: Bot,
+  };
+}
+
 function CharacterFigure({
   className = '',
   profile,
   role = 'client',
   mood = 'talking',
+  operationState = 'working',
   label,
   interactive = false,
   selected = false,
   style,
   onClick,
   children,
+  ...rest
 }) {
   const Tag = interactive ? 'button' : 'div';
   return (
     <Tag
-      className={`character-actor ${interactive ? 'avatar iso-avatar' : 'ambient-people'} role-${role} mood-${mood} motion-${profile.motion} ${selected ? 'is-selected' : ''} ${className}`}
+      className={`character-actor ${interactive ? 'avatar iso-avatar' : 'ambient-people'} role-${role} mood-${mood} motion-${profile.motion} state-${operationState} ${selected ? 'is-selected' : ''} ${className}`}
       style={{
         '--skin': profile.skin,
         '--hair': profile.hair,
@@ -1075,13 +1450,19 @@ function CharacterFigure({
       type={interactive ? 'button' : undefined}
       title={label}
       aria-label={label}
+      {...rest}
     >
       <span className="character-shadow" />
       <span className="character-head">
         <span className="hair-cap" />
         <span className="face">
+          <span className="brow brow-left" />
+          <span className="brow brow-right" />
           <span className="eye eye-left" />
           <span className="eye eye-right" />
+          <span className="nose" />
+          <span className="cheek cheek-left" />
+          <span className="cheek cheek-right" />
           <span className="mouth" />
         </span>
         <span className={`character-accessory accessory-${profile.accessory}`} />
@@ -1098,10 +1479,242 @@ function CharacterFigure({
   );
 }
 
-function StoreMap({ conversations, selectedId, onSelect, onOpenList, onReset, tick, pendingIds }) {
+function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenApprovals, onOpenList, onReset, pendingIds, requests = [] }) {
   const [showRoutes, setShowRoutes] = useState(true);
   const [reducedMotion, setReducedMotion] = useState(false);
+  const [activeZoneId, setActiveZoneId] = useState('approval');
+  const [zonePanelCollapsed, setZonePanelCollapsed] = useState(true);
+  const [camera, setCamera] = useState({ x: 0, y: 0, scale: 1 });
+  const [cameraGesture, setCameraGesture] = useState('idle');
+  const mapRef = useRef(null);
+  const cameraStageRef = useRef(null);
+  const dragRef = useRef(null);
+  const activePointersRef = useRef(new Map());
+  const suppressStageClickRef = useRef(false);
+  const cameraWheelTimerRef = useRef(null);
   const pendingCount = conversations.filter((conversation) => pendingIds.has(conversation.id) || conversation.status === 'approval_required').length;
+  const activeZone = storeZones.find((zone) => zone.id === activeZoneId) ?? storeZones[0];
+  const activeZoneConversations = conversations.filter((conversation) => conversationBelongsToZone(conversation, activeZone.id, pendingIds));
+  const activeZoneCount = activeZoneConversations.length;
+  const activeZoneRisk = zoneRiskLabel(activeZoneConversations, pendingIds);
+  const visibleZoneCases = activeZoneConversations.slice(0, 3);
+  const hasZoneFocus = activeZoneCount > 0;
+  const lodMode = conversations.length > 200 ? 'enterprise' : conversations.length > 24 ? 'zone' : 'individual';
+  const criticalConversations = conversations.filter((conversation) => (
+    pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)
+  ));
+  const selectedConversation = conversations.find((conversation) => conversation.id === selectedId);
+  const visibleAvatars = lodMode === 'individual'
+    ? conversations
+    : uniqueConversations([
+      ...criticalConversations.slice(0, lodMode === 'enterprise' ? 8 : 12),
+      selectedConversation,
+      ...activeZoneConversations.slice(0, lodMode === 'enterprise' ? 6 : 14),
+    ]).slice(0, lodMode === 'enterprise' ? 14 : 26);
+  const hiddenConversationCount = Math.max(0, conversations.length - visibleAvatars.length);
+  const latestEventByConversation = useMemo(() => {
+    const latestEvents = new Map();
+    events.forEach((event) => {
+      if (event?.conversationId && !latestEvents.has(event.conversationId)) {
+        latestEvents.set(event.conversationId, event);
+      }
+    });
+    return latestEvents;
+  }, [events]);
+  const prioritySignal = useMemo(() => prioritySignalForStore(events, conversations, pendingIds, requests), [events, conversations, pendingIds, requests]);
+  const autoFocusedSignalRef = useRef('');
+  const zoneSummaries = storeZones.map((zone) => {
+    const zoneItems = conversations.filter((conversation) => zoneForGrouping(conversation, pendingIds) === zone.id || conversationBelongsToZone(conversation, zone.id, pendingIds));
+    return {
+      ...zone,
+      count: zoneItems.length,
+      critical: zoneItems.filter((conversation) => (
+        pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded'].includes(conversation.status)
+      )).length,
+    };
+  }).filter((zone) => zone.count);
+
+  function clampCamera(nextCamera) {
+    const scale = Math.min(1.6, Math.max(0.9, Number(nextCamera.scale) || 1));
+    const rect = mapRef.current?.getBoundingClientRect();
+    const maxX = rect ? Math.max(36, rect.width * (scale - 1) * 0.6) : 220;
+    const maxY = rect ? Math.max(28, rect.height * (scale - 1) * 0.56) : 160;
+    return {
+      scale,
+      x: Math.min(maxX, Math.max(-maxX, Number(nextCamera.x) || 0)),
+      y: Math.min(maxY, Math.max(-maxY, Number(nextCamera.y) || 0)),
+    };
+  }
+
+  function updateCamera(nextCamera) {
+    setCamera((current) => clampCamera({ ...current, ...nextCamera }));
+  }
+
+  function zoomCamera(delta) {
+    setCamera((current) => {
+      const nextScale = Math.round((current.scale + delta) * 100) / 100;
+      return clampCamera({ ...current, scale: nextScale });
+    });
+  }
+
+  function panCamera(dx, dy) {
+    setCamera((current) => clampCamera({ ...current, x: current.x + dx, y: current.y + dy }));
+  }
+
+  function resetCamera() {
+    setCamera({ x: 0, y: 0, scale: 1 });
+  }
+
+  function focusZone(zoneId) {
+    setActiveZoneId(zoneId);
+    const center = zoneCenter(zoneId);
+    const rect = mapRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const nextScale = zoneId === 'approval' ? 1.14 : 1.12;
+    updateCamera({
+      scale: nextScale,
+      x: ((50 - center.x) / 100) * rect.width * nextScale,
+      y: ((50 - center.y) / 100) * rect.height * nextScale,
+    });
+  }
+
+  function handleCameraPointerDown(event) {
+    if (event.target.closest('button, input, select, textarea, a')) return;
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const pointers = [...activePointersRef.current.values()];
+    if (pointers.length === 2) {
+      dragRef.current = {
+        mode: 'pinch',
+        distance: pointerDistance(pointers[0], pointers[1]),
+        center: pointerCenter(pointers[0], pointers[1]),
+        camera,
+      };
+      setCameraGesture('pinch');
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      return;
+    }
+    dragRef.current = {
+      mode: 'pan',
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      camera,
+      moved: false,
+    };
+    setCameraGesture('pan');
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handleCameraPointerMove(event) {
+    if (!dragRef.current || !activePointersRef.current.has(event.pointerId)) return;
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (dragRef.current.mode === 'pinch') {
+      const pointers = [...activePointersRef.current.values()];
+      if (pointers.length < 2 || !dragRef.current.distance) return;
+      const distance = pointerDistance(pointers[0], pointers[1]);
+      const center = pointerCenter(pointers[0], pointers[1]);
+      const nextScale = Math.round((dragRef.current.camera.scale * (distance / dragRef.current.distance)) * 100) / 100;
+      suppressStageClickRef.current = true;
+      setCamera(clampCamera({
+        ...dragRef.current.camera,
+        scale: nextScale,
+        x: dragRef.current.camera.x + (center.x - dragRef.current.center.x) * 0.72,
+        y: dragRef.current.camera.y + (center.y - dragRef.current.center.y) * 0.72,
+      }));
+      return;
+    }
+    if (dragRef.current.pointerId !== event.pointerId) return;
+    const dx = event.clientX - dragRef.current.startX;
+    const dy = event.clientY - dragRef.current.startY;
+    if (Math.abs(dx) + Math.abs(dy) > 6) {
+      dragRef.current.moved = true;
+      suppressStageClickRef.current = true;
+    }
+    setCamera(clampCamera({
+      ...dragRef.current.camera,
+      x: dragRef.current.camera.x + dx * 0.86,
+      y: dragRef.current.camera.y + dy * 0.86,
+    }));
+  }
+
+  function handleCameraPointerEnd(event) {
+    activePointersRef.current.delete(event.pointerId);
+    if (activePointersRef.current.size === 1) {
+      const remaining = [...activePointersRef.current.entries()][0];
+      dragRef.current = {
+        mode: 'pan',
+        pointerId: remaining[0],
+        startX: remaining[1].x,
+        startY: remaining[1].y,
+        camera,
+        moved: false,
+      };
+      return;
+    }
+    if (dragRef.current?.pointerId === event.pointerId || dragRef.current?.mode === 'pinch') {
+      dragRef.current = null;
+    }
+    setCameraGesture('idle');
+    window.setTimeout(() => {
+      suppressStageClickRef.current = false;
+    }, 160);
+  }
+
+  function handleCameraWheel(event) {
+    if (event.target.closest('button, input, select, textarea, a')) return;
+    event.preventDefault();
+    setCameraGesture('wheel');
+    const delta = Math.max(-0.16, Math.min(0.16, -event.deltaY / 900));
+    if (!delta) return;
+    setCamera((current) => {
+      const nextScale = Math.round((current.scale + delta) * 100) / 100;
+      return clampCamera({ ...current, scale: nextScale });
+    });
+    window.clearTimeout(cameraWheelTimerRef.current);
+    cameraWheelTimerRef.current = window.setTimeout(() => setCameraGesture('idle'), 180);
+  }
+
+  function handleStageClickCapture(event) {
+    if (!suppressStageClickRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function openZoneCases() {
+    if (visibleZoneCases[0]) {
+      onSelect(visibleZoneCases[0].id);
+      return;
+    }
+    onOpenList();
+  }
+
+  function openPrioritySignal() {
+    if (!prioritySignal) return;
+    if (prioritySignal.request?.id) {
+      onOpenApprovals(prioritySignal.request.id);
+      return;
+    }
+    if (prioritySignal.needsHuman) {
+      onOpenApprovals();
+      return;
+    }
+    if (prioritySignal.conversation?.id) {
+      onSelect(prioritySignal.conversation.id);
+    }
+  }
+
+  useEffect(() => {
+    if (!prioritySignal || autoFocusedSignalRef.current === prioritySignal.id) return;
+    autoFocusedSignalRef.current = prioritySignal.id;
+    focusZone(prioritySignal.zone);
+  }, [prioritySignal?.id]);
+
+  useEffect(() => {
+    const stage = cameraStageRef.current;
+    if (!stage) return undefined;
+    stage.addEventListener('wheel', handleCameraWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', handleCameraWheel);
+  });
 
   return (
     <section className="store-map-shell">
@@ -1116,134 +1729,281 @@ function StoreMap({ conversations, selectedId, onSelect, onOpenList, onReset, ti
             <span><i className="dot approval" /> Requiere apoyo</span>
             <span><i className="dot blocked" /> Bloqueo</span>
           </div>
-          <button className="map-chip" type="button" onClick={() => setShowRoutes((value) => !value)}>
+          <button className="map-chip" type="button" aria-pressed={showRoutes} onClick={() => setShowRoutes((value) => !value)}>
             {showRoutes ? 'Rutas visibles' : 'Rutas ocultas'}
           </button>
           <button className="map-chip" type="button" onClick={onOpenList}>
             Vista lista
           </button>
-          <button className="map-chip" type="button" onClick={onReset}>
+          <button className="map-chip" type="button" onClick={() => {
+            resetCamera();
+            onReset();
+          }}>
             <RotateCcw size={13} />
             Centrar vista
           </button>
-          <button className="map-chip" type="button" onClick={() => setReducedMotion((value) => !value)}>
+          <button className="map-chip" type="button" aria-pressed={reducedMotion} onClick={() => setReducedMotion((value) => !value)}>
             {reducedMotion ? 'Movimiento reducido' : 'Animación viva'}
           </button>
         </div>
       </div>
+      <div className="zone-quick-nav" aria-label="Navegación rápida por zonas de la tienda">
+        {storeZones.map((zone) => (
+          <button
+            className={`zone-jump zone-jump-${zone.id} ${activeZoneId === zone.id ? 'is-active' : ''}`}
+            key={zone.id}
+            aria-current={activeZoneId === zone.id ? 'true' : undefined}
+            aria-label={`Enfocar ${zone.label}: ${zone.source}`}
+            onClick={() => focusZone(zone.id)}
+            type="button"
+          >
+            <span>{zone.short}</span>
+            <small>{zone.label}</small>
+          </button>
+        ))}
+      </div>
 
       <div
-        className={`store-map iso-store ${showRoutes ? 'show-routes' : 'hide-routes'} ${reducedMotion ? 'reduce-motion' : ''}`}
-        role="img"
+        ref={mapRef}
+        className={`store-map iso-store lod-${lodMode} camera-${cameraGesture} ${lodMode !== 'individual' ? 'performance-mode' : ''} ${showRoutes ? 'show-routes' : 'hide-routes'} ${reducedMotion ? 'reduce-motion' : ''}`}
+        data-camera-scale={camera.scale.toFixed(2)}
+        data-camera-gesture={cameraGesture}
+        role="region"
         aria-label="Tienda isométrica interactiva con conversaciones reales del agente"
       >
-        <div className="iso-back-wall">
-          <span className="wall-display display-left">Canales</span>
-          <span className="wall-display display-center">Catálogo</span>
-          <span className="wall-display display-right">Servicio</span>
+        <div className="camera-dock" role="toolbar" aria-label="Controles de cámara de Tienda viva">
+          <button type="button" onClick={() => zoomCamera(0.12)} aria-label="Acercar cámara">
+            <ZoomIn size={15} />
+          </button>
+          <button type="button" onClick={() => zoomCamera(-0.12)} aria-label="Alejar cámara">
+            <ZoomOut size={15} />
+          </button>
+          <button type="button" onClick={() => panCamera(-72, 0)} aria-label="Mover cámara a la izquierda">←</button>
+          <button type="button" onClick={() => panCamera(72, 0)} aria-label="Mover cámara a la derecha">→</button>
+          <button type="button" onClick={() => panCamera(0, -58)} aria-label="Mover cámara arriba">↑</button>
+          <button type="button" onClick={() => panCamera(0, 58)} aria-label="Mover cámara abajo">↓</button>
+          <button type="button" onClick={resetCamera} aria-label="Restablecer cámara">
+            <Move size={15} />
+          </button>
         </div>
-        <div className="iso-side-wall" />
-        <div className="floor-grid" />
-        <div className="iso-floor-glow" />
-        <div className="checkout-belt" />
-        <div className="vertical-tools">
-          <span />
-          <span />
-          <span />
-          <span />
-        </div>
-        <div className={`intervention-sign ${pendingCount ? 'is-hot' : ''}`}>
+        <button
+          className={`intervention-sign ${pendingCount ? 'is-hot' : ''}`}
+          type="button"
+          onClick={pendingCount ? onOpenApprovals : undefined}
+          aria-label={pendingCount ? `Abrir ${pendingCount} solicitudes que requieren apoyo humano` : 'Sin solicitudes humanas pendientes'}
+        >
           <strong>Requiere apoyo</strong>
           <span>{pendingCount ? `${pendingCount} casos` : 'sin pendientes'}</span>
+        </button>
+
+        <div
+          className={`zone-focus-panel ${activeZoneRisk.includes('apoyo') ? 'has-risk' : ''} ${zonePanelCollapsed ? 'is-collapsed' : 'is-expanded'}`}
+          aria-live="polite"
+          data-zone={activeZone.id}
+        >
+          <button
+            className="zone-focus-summary"
+            type="button"
+            aria-expanded={!zonePanelCollapsed}
+            onClick={() => setZonePanelCollapsed((value) => !value)}
+          >
+            <span>Zona enfocada</span>
+            <strong>{activeZone.label}</strong>
+            <small>{activeZoneCount} casos · {activeZoneRisk}</small>
+            {zonePanelCollapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+          </button>
+          {!zonePanelCollapsed && (
+            <div className="zone-focus-body">
+              {lodMode !== 'individual' && (
+                <small className="lod-caption">
+                  LOD {lodMode === 'enterprise' ? 'empresa' : 'zona'} · {visibleAvatars.length} visibles · {hiddenConversationCount} agrupados
+                </small>
+              )}
+              <div className="zone-case-list" aria-label={`Casos relacionados con ${activeZone.label}`}>
+                {visibleZoneCases.length ? visibleZoneCases.map((conversation) => (
+                  <button
+                    className={selectedId === conversation.id ? 'is-selected' : ''}
+                    key={conversation.id}
+                    onClick={() => onSelect(conversation.id)}
+                    type="button"
+                  >
+                    <b>{conversation.avatar}</b>
+                    <span>{conversation.customer}</span>
+                    <i>{statusLabel[conversation.status] ?? conversation.status}</i>
+                  </button>
+                )) : (
+                  <p>Sin casos en esta zona</p>
+                )}
+              </div>
+              <button className="text-btn zone-open-btn" type="button" onClick={openZoneCases}>Ver casos de esta zona</button>
+            </div>
+          )}
         </div>
 
-        {storeZones.map((zone) => {
-          const Icon = zoneIcon[zone.kind] ?? Store;
-          return (
-            <button
-              className={`zone iso-zone zone-${zone.kind} zone-${zone.id}`}
-              key={zone.id}
-              style={{ left: `${zone.x}%`, top: `${zone.y}%`, width: `${zone.w}%`, height: `${zone.h}%` }}
-              type="button"
-              title={`${zone.short} · ${zone.label}`}
-            >
-              {renderZoneInterior(zone, Icon)}
+        {prioritySignal && (
+          <div
+            className={`priority-event-card ${prioritySignal.needsHuman ? 'needs-human' : ''}`}
+            data-priority-event-id={prioritySignal.id}
+            data-priority-source={prioritySignal.source}
+            data-priority-zone={prioritySignal.zone}
+            data-priority-request-id={prioritySignal.request?.id ?? ''}
+            data-priority-conversation-id={prioritySignal.conversation?.id ?? ''}
+            role="status"
+          >
+            <span>{prioritySignal.source === 'event' ? 'Evento prioritario' : 'Caso requiere atención'}</span>
+            <strong>{prioritySignal.title}</strong>
+            <small>{prioritySignal.conversation?.customer} · {prioritySignal.detail}</small>
+            <button type="button" onClick={openPrioritySignal}>
+              {prioritySignal.actionLabel}
             </button>
-          );
-        })}
+          </div>
+        )}
 
-        <svg className="route-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-          <path className="route route-main" d="M14 48 C22 43 30 51 36 51 C45 50 50 31 55 28 C64 23 75 27 82 25" />
-          <path className="route route-support" d="M36 51 C45 55 54 46 66 46 C76 47 84 58 88 63" />
-          <path className="route route-close" d="M63 68 C55 76 48 80 45 80 C35 79 25 76 18 76" />
-          <path className="route route-intervention" d="M36 51 C52 60 66 66 88 64" />
-        </svg>
-
-        {ambientCharacters.map((person) => (
-          <CharacterFigure
-            className={person.className}
-            key={person.className}
-            label={person.label}
-            mood={person.mood}
-            profile={person.profile}
-            role={person.role}
-          />
-        ))}
-        <CharacterFigure
-          className="agent-assistant bot-a"
-          label="Agente IA atendiendo la conversación"
-          mood="talking"
-          profile={{ skin: '#cdeaf0', hair: '#3d8394', shirt: '#9ee7f3', pants: '#3f6570', accent: '#f6d674', accessory: 'badge', motion: 'steady' }}
-          role="agent"
+        <div
+          ref={cameraStageRef}
+          className="store-camera-stage"
+          data-camera-x={Math.round(camera.x)}
+          data-camera-y={Math.round(camera.y)}
+          onClickCapture={handleStageClickCapture}
+          onPointerCancel={handleCameraPointerEnd}
+          onPointerDown={handleCameraPointerDown}
+          onPointerMove={handleCameraPointerMove}
+          onPointerUp={handleCameraPointerEnd}
+          style={{
+            transform: `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${camera.scale})`,
+          }}
         >
-          <span className="agent-aura"><Bot size={13} /></span>
-        </CharacterFigure>
-        <CharacterFigure
-          className="agent-assistant bot-b"
-          label="Agente IA acompañando solicitud de ayuda"
-          mood={pendingCount ? 'waiting' : 'talking'}
-          profile={{ skin: '#d8f2f5', hair: '#487d8b', shirt: '#b4edf5', pants: '#3c6070', accent: '#ffb25e', accessory: 'badge', motion: 'steady' }}
-          role="agent"
-        >
-          <span className="agent-aura"><Bot size={12} /></span>
-        </CharacterFigure>
+          <div className="iso-back-wall">
+            <span className="wall-display display-left">Canales</span>
+            <span className="wall-display display-center">Catálogo</span>
+            <span className="wall-display display-right">Servicio</span>
+          </div>
+          <div className="iso-side-wall" />
+          <div className="floor-grid" />
+          <div className="iso-floor-glow" />
+          <div className="checkout-belt" />
 
-        {conversations.map((conversation, index) => {
-          const currentZoneIndex = Math.min(
-            conversation.path.length - 1,
-            Math.abs((tick + index) % (conversation.path.length + 2)) >= conversation.path.length
-              ? conversation.path.length - 1
-              : Math.abs((tick + index) % (conversation.path.length + 2)),
-          );
-          const currentZone = conversation.status === 'approval_required' || pendingIds.has(conversation.id)
-            ? 'approval'
-            : conversation.status === 'blocked'
-              ? 'approval'
-              : conversation.path[currentZoneIndex];
-          const center = zoneCenter(currentZone);
-          return (
+          {lodMode !== 'individual' && (
+            <div className="zone-cluster-layer" aria-label="Agrupación de conversaciones por zona">
+              {zoneSummaries.map((zone) => {
+                const center = zoneCenter(zone.id);
+                return (
+                  <button
+                    className={`zone-cluster cluster-${zone.id} ${activeZoneId === zone.id ? 'is-active' : ''} ${zone.critical ? 'has-risk' : ''}`}
+                    key={zone.id}
+                    onClick={() => focusZone(zone.id)}
+                    style={{
+                      left: `calc(${center.x}% + ${zone.id === 'approval' ? -18 : 18}px)`,
+                      top: `calc(${center.y}% + ${zone.id === 'approval' ? -24 : -18}px)`,
+                    }}
+                    type="button"
+                  >
+                    <strong>{zone.count}</strong>
+                    <span>{zone.short}</span>
+                    {zone.critical ? <i>{zone.critical}</i> : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {storeZones.map((zone) => {
+            const Icon = zoneIcon[zone.kind] ?? Store;
+            return (
+              <button
+                className={`zone iso-zone zone-${zone.kind} zone-${zone.id} ${activeZoneId === zone.id ? 'is-focused' : ''} ${zone.id === 'approval' && pendingCount ? 'has-risk' : ''}`}
+                key={zone.id}
+                onClick={() => focusZone(zone.id)}
+                style={{ left: `${zone.x}%`, top: `${zone.y}%`, width: `${zone.w}%`, height: `${zone.h}%` }}
+                type="button"
+                aria-label={`Enfocar zona ${zone.label}. ${zone.source}`}
+                title={`${zone.short} · ${zone.label}`}
+              >
+                {renderZoneInterior(zone, Icon)}
+              </button>
+            );
+          })}
+
+          <svg className="route-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <path className="route route-main" d="M14 48 C22 43 30 51 36 51 C45 50 50 31 55 28 C64 23 75 27 82 25" />
+            <path className="route route-support" d="M36 51 C45 55 54 46 66 46 C76 47 84 58 88 63" />
+            <path className="route route-close" d="M63 68 C55 76 48 80 45 80 C35 79 25 76 18 76" />
+            <path className="route route-intervention" d="M36 51 C52 60 66 66 88 64" />
+          </svg>
+
+          {ambientCharacters.map((person) => (
             <CharacterFigure
-              className={`avatar-${conversation.status}`}
-              key={conversation.id}
-              interactive
-              label={`${conversation.customer} · ${statusLabel[conversation.status]}`}
-              mood={getCharacterMood(conversation, pendingIds)}
-              onClick={() => onSelect(conversation.id)}
-              profile={getCharacterProfile(conversation, index)}
-              role="client"
-              selected={selectedId === conversation.id}
-              style={{
-                left: `calc(${center.x}% + ${(index % 3) * 12 - 12}px)`,
-                top: `calc(${center.y}% + ${(index % 2) * 12 - 6}px)`,
-                transitionDelay: `${index * 45}ms`,
-              }}
-            >
-              <em className="speech-bubble">{conversation.status === 'approval_required' ? '!' : conversation.status === 'blocked' ? '?' : '...'}</em>
-              <span className="character-badge">{conversation.avatar}</span>
-              <i className="status-light" />
-            </CharacterFigure>
-          );
-        })}
+              className={person.className}
+              key={person.className}
+              label={person.label}
+              mood={person.mood}
+              profile={person.profile}
+              role={person.role}
+            />
+          ))}
+          <CharacterFigure
+            className="agent-assistant bot-a"
+            label="Agente IA atendiendo la conversación"
+            mood="talking"
+            profile={{ skin: '#cdeaf0', hair: '#3d8394', shirt: '#9ee7f3', pants: '#3f6570', accent: '#f6d674', accessory: 'badge', motion: 'steady' }}
+            role="agent"
+          >
+            <span className="agent-aura"><Bot size={13} /></span>
+          </CharacterFigure>
+          <CharacterFigure
+            className="agent-assistant bot-b"
+            label="Agente IA acompañando solicitud de ayuda"
+            mood={pendingCount ? 'waiting' : 'talking'}
+            profile={{ skin: '#d8f2f5', hair: '#487d8b', shirt: '#b4edf5', pants: '#3c6070', accent: '#ffb25e', accessory: 'badge', motion: 'steady' }}
+            role="agent"
+          >
+            <span className="agent-aura"><Bot size={12} /></span>
+          </CharacterFigure>
+
+          {visibleAvatars.map((conversation, index) => {
+            const latestEvent = latestEventByConversation.get(conversation.id);
+            const semanticZone = semanticZoneForConversation(conversation, pendingIds, latestEvent);
+            const operationalPose = getOperationalPose(conversation, pendingIds, latestEvent);
+            const PoseIcon = operationalPose.icon;
+            const center = zoneCenter(semanticZone.zone);
+            const offset = stableAvatarOffset(conversation.id, index);
+            const belongsToActiveZone = conversationBelongsToZone(conversation, activeZoneId, pendingIds);
+            const isPriorityConversation = prioritySignal?.conversation?.id === conversation.id;
+            return (
+              <CharacterFigure
+                className={`avatar-${conversation.status} ${belongsToActiveZone ? 'is-zone-related' : ''} ${isPriorityConversation ? 'is-priority' : ''} ${hasZoneFocus && !belongsToActiveZone && !isPriorityConversation ? 'is-zone-dimmed' : ''}`}
+                data-conversation-id={conversation.id}
+                data-operation-label={operationalPose.label}
+                data-operation-reason={operationalPose.reason}
+                data-operation-state={operationalPose.state}
+                data-zone={semanticZone.zone}
+                data-zone-source={semanticZone.source}
+                key={conversation.id}
+                interactive
+                label={`Abrir conversación WhatsApp de ${conversation.customer} · ${statusLabel[conversation.status]} · ${operationalPose.reason}`}
+                mood={getCharacterMood(conversation, pendingIds)}
+                onClick={() => onSelect(conversation.id)}
+                operationState={operationalPose.state}
+                profile={getCharacterProfile(conversation, index)}
+                role="client"
+                selected={selectedId === conversation.id}
+                style={{
+                  left: `calc(${center.x}% + ${offset.x}px)`,
+                  top: `calc(${center.y}% + ${offset.y}px)`,
+                  transitionDelay: `${index * 45}ms`,
+                }}
+              >
+                <em className="speech-bubble">{conversation.status === 'approval_required' ? '!' : conversation.status === 'blocked' ? '?' : '...'}</em>
+                <span className={`operation-prop prop-${operationalPose.state}`} aria-hidden="true">
+                  <PoseIcon size={12} strokeWidth={2.6} />
+                </span>
+                <span className="operation-state-label">{operationalPose.label}</span>
+                <span className="character-badge">{conversation.avatar}</span>
+                <i className="status-light" />
+              </CharacterFigure>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
@@ -1319,6 +2079,7 @@ function ZoneLabel({ zone, Icon }) {
 }
 
 function SummaryView({ conversations: conversationItems, events, metrics, onNavigate, onSelectConversation, requests: requestItems, tools: toolItems, usage }) {
+  const [activeSummaryFocus, setActiveSummaryFocus] = useState('attention');
   const activePipeline = [
     ['Entrada', conversationItems.filter((item) => item.path.includes('whatsapp')).length],
     ['Atención IA', conversationItems.filter((item) => item.path.includes('agent')).length],
@@ -1333,15 +2094,38 @@ function SummaryView({ conversations: conversationItems, events, metrics, onNavi
     },
     {},
   );
+  const summaryFocusTabs = [
+    ['attention', ListChecks, 'Atención', requestItems.length ? `${requestItems.length} pendientes` : 'Sin bloqueos'],
+    ['usage', ShoppingBag, 'Uso del plan', formatUsageRatio(usage.metrics.deliveries_confirmed, usage.limits.includedDeliveries)],
+    ['activity', Activity, 'Actividad', `${events.length} eventos`],
+  ];
 
   return (
     <section className="summary-layout">
-      <div className="section-title">
-        <span className="eyebrow">Resumen operativo</span>
-        <h2>Qué requiere atención ahora</h2>
+      <div className="section-title split-title summary-titlebar">
+        <div>
+          <span className="eyebrow">Resumen operativo</span>
+          <h2>Qué requiere atención ahora</h2>
+        </div>
+        <div className="workspace-tabs compact-tabs summary-tabs" role="tablist" aria-label="Foco del resumen operativo">
+          {summaryFocusTabs.map(([key, Icon, label, hint]) => (
+            <button
+              aria-selected={activeSummaryFocus === key}
+              className={activeSummaryFocus === key ? 'is-active' : ''}
+              key={key}
+              onClick={() => setActiveSummaryFocus(key)}
+              role="tab"
+              type="button"
+            >
+              <Icon size={16} />
+              <span>{label}</span>
+              <small>{hint}</small>
+            </button>
+          ))}
+        </div>
       </div>
       <div className="summary-grid">
-        <UsagePlanCard usage={usage} onOpenAnalytics={() => onNavigate('analytics')} />
+        {activeSummaryFocus === 'usage' && <UsagePlanCard usage={usage} onOpenAnalytics={() => onNavigate('analytics')} />}
         <article className="ops-card priority-card">
           <div className="mini-row">
             <span>Prioridad</span>
@@ -1354,67 +2138,75 @@ function SummaryView({ conversations: conversationItems, events, metrics, onNavi
             Revisar aprobaciones
           </button>
         </article>
-        <article className="ops-card">
-          <span className="eyebrow">Embudo vivo</span>
-          <div className="funnel-bars">
-            {activePipeline.map(([label, value], index) => (
-              <button
-                className="funnel-row"
-                key={label}
-                onClick={() => onNavigate(index === 3 ? 'approvals' : 'conversations')}
-                type="button"
-              >
-                <span>{label}</span>
-                <b style={{ width: `${Math.max(value * 18, 12)}%` }} />
-                <strong>{value}</strong>
-              </button>
+        {activeSummaryFocus === 'attention' && (
+          <article className="ops-card">
+            <span className="eyebrow">Embudo vivo</span>
+            <div className="funnel-bars">
+              {activePipeline.map(([label, value], index) => (
+                <button
+                  className="funnel-row"
+                  key={label}
+                  onClick={() => onNavigate(index === 3 ? 'approvals' : 'conversations')}
+                  type="button"
+                >
+                  <span>{label}</span>
+                  <b style={{ width: `${Math.min(100, Math.max(value * 18, 12))}%` }} />
+                  <strong>{value}</strong>
+                </button>
+              ))}
+            </div>
+          </article>
+        )}
+        {(activeSummaryFocus === 'attention' || activeSummaryFocus === 'usage') && (
+          <article className="ops-card">
+            <span className="eyebrow">Salud operativa</span>
+            <div className="health-grid">
+              <div>
+                <strong>{health.sandbox_ready ?? 0}</strong>
+                <span>Listas</span>
+              </div>
+              <div>
+                <strong>{metrics.binding}</strong>
+                <span>Conexiones</span>
+              </div>
+              <div>
+                <strong>{metrics.failed}</strong>
+                <span>Riesgos</span>
+              </div>
+            </div>
+            <button className="ghost-btn compact" type="button" onClick={() => onNavigate('config')}>
+              <Settings2 size={16} />
+              Ver integraciones
+            </button>
+          </article>
+        )}
+        {activeSummaryFocus === 'activity' && (
+          <article className="ops-card span-2">
+            <span className="eyebrow">Conversaciones recientes</span>
+            <div className="conversation-list compact-list">
+              {conversationItems.slice(0, 4).map((conversation) => (
+                <button className="conversation-row" key={conversation.id} onClick={() => onSelectConversation(conversation.id, 'conversations')} type="button">
+                  <span className="avatar-token">{conversation.avatar}</span>
+                  <div>
+                    <strong>{conversation.customer}</strong>
+                    <span>{conversation.need}</span>
+                  </div>
+                  <StatusPill status={conversation.status} />
+                </button>
+              ))}
+            </div>
+          </article>
+        )}
+        {activeSummaryFocus === 'activity' && (
+          <article className="ops-card">
+            <span className="eyebrow">Eventos</span>
+            {events.slice(0, 5).map((event) => (
+              <p className="event-line" key={event.id}>
+                <span>{formatEventTime(event.at)}</span> {eventTypeLabel(event.type)}
+              </p>
             ))}
-          </div>
-        </article>
-        <article className="ops-card">
-          <span className="eyebrow">Salud operativa</span>
-          <div className="health-grid">
-            <div>
-              <strong>{health.sandbox_ready ?? 0}</strong>
-              <span>Listas</span>
-            </div>
-            <div>
-              <strong>{metrics.binding}</strong>
-              <span>Conexiones</span>
-            </div>
-            <div>
-              <strong>{metrics.failed}</strong>
-              <span>Riesgos</span>
-            </div>
-          </div>
-          <button className="ghost-btn compact" type="button" onClick={() => onNavigate('config')}>
-            <Settings2 size={16} />
-            Ver integraciones
-          </button>
-        </article>
-        <article className="ops-card span-2">
-          <span className="eyebrow">Conversaciones recientes</span>
-          <div className="conversation-list compact-list">
-            {conversationItems.slice(0, 4).map((conversation) => (
-              <button className="conversation-row" key={conversation.id} onClick={() => onSelectConversation(conversation.id, 'store')} type="button">
-                <span className="avatar-token">{conversation.avatar}</span>
-                <div>
-                  <strong>{conversation.customer}</strong>
-                  <span>{conversation.need}</span>
-                </div>
-                <StatusPill status={conversation.status} />
-              </button>
-            ))}
-          </div>
-        </article>
-        <article className="ops-card">
-          <span className="eyebrow">Eventos</span>
-          {events.slice(0, 5).map((event) => (
-            <p className="event-line" key={event.id}>
-              <span>{formatEventTime(event.at)}</span> {eventTypeLabel(event.type)}
-            </p>
-          ))}
-        </article>
+          </article>
+        )}
       </div>
     </section>
   );
@@ -1480,79 +2272,191 @@ function UsageMeter({ label, used, limit, percent }) {
 }
 
 function ConversationsView({
+  backendStatus,
   conversations: conversationItems,
+  detailCollapsed,
   events,
+  onOpenApprovals,
   onSelectConversation,
+  onToggleDetail,
+  pendingRequest,
   query,
+  searchInputRef,
+  selectedConversation,
   selectedId,
   setQuery,
   setStatusFilter,
   statusFilter,
+  workspaceTab,
+  setWorkspaceTab,
+  mobileDetailOpen,
+  onOpenMobileDetail,
+  onCloseMobileDetail,
+  tab,
+  setTab,
 }) {
   const statuses = ['all', 'live', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
+  const activeWorkspaceTab = workspaceTab === 'detail' ? 'detail' : 'list';
+  function selectConversation(id) {
+    onSelectConversation(id);
+    setWorkspaceTab?.('detail');
+  }
+  function returnToList() {
+    setWorkspaceTab?.('list');
+    onCloseMobileDetail?.();
+  }
   return (
-    <section className="conversations-layout">
-      <div className="section-title split-title">
+    <section className={`conversations-layout ${mobileDetailOpen ? 'is-detail-open' : ''} conversation-workspace-${activeWorkspaceTab}`}>
+      <div className="section-title split-title conversation-titlebar">
         <div>
-          <span className="eyebrow">Vista lista</span>
-          <h2>Bandeja de conversaciones</h2>
+          <span className="eyebrow">{activeWorkspaceTab === 'list' ? 'Vista lista' : 'Vista detalle'}</span>
+          <h2>{activeWorkspaceTab === 'list' ? 'Bandeja de conversaciones' : selectedConversation?.customer ?? 'Detalle de conversación'}</h2>
         </div>
-        <div className="filter-strip">
-          <label className="global-search inline-search">
-            <Search size={16} />
-            <input
-              aria-label="Buscar en conversaciones"
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Cliente, ID, necesidad"
-              value={query}
-            />
-          </label>
-          <label className="select-filter">
-            <ListFilter size={16} />
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-              {statuses.map((status) => (
-                <option key={status} value={status}>
-                  {status === 'all' ? 'Todos los estados' : statusLabel[status]}
-                </option>
-              ))}
-            </select>
-          </label>
+        <div className="conversation-workspace-tabs" role="tablist" aria-label="Navegación de conversaciones">
+          <button
+            aria-selected={activeWorkspaceTab === 'list'}
+            className={activeWorkspaceTab === 'list' ? 'is-active' : ''}
+            onClick={returnToList}
+            role="tab"
+            type="button"
+          >
+            <MessageSquareText size={16} />
+            Listado
+          </button>
+          <button
+            aria-selected={activeWorkspaceTab === 'detail'}
+            className={activeWorkspaceTab === 'detail' ? 'is-active' : ''}
+            disabled={!selectedConversation}
+            onClick={() => {
+              setWorkspaceTab?.('detail');
+              onOpenMobileDetail?.();
+            }}
+            role="tab"
+            type="button"
+          >
+            <Eye size={16} />
+            Detalle
+          </button>
         </div>
       </div>
-      <div className="conversation-grid">
-        <article className="conversation-list">
-          {conversationItems.length === 0 && (
-            <div className="empty-state">
-              <Search size={28} />
-              <h3>Sin conversaciones para este filtro</h3>
-              <p>Ajusta la búsqueda o vuelve a todos los estados.</p>
-            </div>
-          )}
-          {conversationItems.map((conversation) => (
-            <button
-              className={selectedId === conversation.id ? 'conversation-row is-selected' : 'conversation-row'}
-              key={conversation.id}
-              onClick={() => onSelectConversation(conversation.id)}
-              type="button"
-            >
-              <span className="avatar-token">{conversation.avatar}</span>
-              <div>
-                <strong>{conversation.customer}</strong>
-                <span>{conversation.id} · {toolLabel(conversation.lastTool)}</span>
-                <small>{conversation.nextStep}</small>
+      {activeWorkspaceTab === 'list' && (
+        <div className="conversation-toolbar">
+          <div className="filter-strip">
+            <label className="global-search inline-search">
+              <Search size={16} />
+              <input
+                aria-label="Buscar en conversaciones"
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Cliente, ID, necesidad"
+                ref={searchInputRef}
+                value={query}
+              />
+            </label>
+            <label className="select-filter">
+              <ListFilter size={16} />
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                {statuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status === 'all' ? 'Todos los estados' : statusLabel[status]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
+      {backendStatus === 'offline' && (
+        <div className="inline-state error-state" role="status">
+          <AlertTriangle size={17} />
+          <span>No se pudo sincronizar con el backend. Estás viendo la última información local disponible.</span>
+        </div>
+      )}
+      {backendStatus === 'connecting' && (
+        <div className="inline-state loading-state" role="status">
+          <Activity size={17} />
+          <span>Cargando conversaciones y estados del agente...</span>
+        </div>
+      )}
+      <div className={`conversation-grid conversation-tab-panel is-${activeWorkspaceTab}`}>
+        {activeWorkspaceTab === 'list' && (
+          <article className="conversation-list" aria-label="Lista de conversaciones">
+            {conversationItems.length === 0 && (
+              <div className="empty-state">
+                <Search size={28} />
+                <h3>Sin conversaciones para este filtro</h3>
+                <p>Ajusta la búsqueda o vuelve a todos los estados.</p>
               </div>
-              <b>{conversation.progress}%</b>
-              <StatusPill status={conversation.status} />
+            )}
+            {conversationItems.map((conversation) => (
+              <button
+                className={selectedId === conversation.id ? 'conversation-row is-selected' : 'conversation-row'}
+                aria-current={selectedId === conversation.id ? 'true' : undefined}
+                key={conversation.id}
+                onClick={() => selectConversation(conversation.id)}
+                type="button"
+              >
+                <span className="avatar-token">{conversation.avatar}</span>
+                <div>
+                  <strong>{conversation.customer}</strong>
+                  <span>{conversation.id} · {toolLabel(conversation.lastTool)}</span>
+                  <small>{conversation.nextStep}</small>
+                </div>
+                <span className="conversation-progress" title="Progreso estimado del flujo operativo de esta conversación">
+                  <small>Progreso</small>
+                  <b>{conversation.progress}%</b>
+                </span>
+                <StatusPill status={conversation.status} />
+              </button>
+            ))}
+          </article>
+        )}
+        {activeWorkspaceTab === 'detail' && selectedConversation ? (
+          <ConversationPanel
+            conversation={selectedConversation}
+            detailCollapsed={detailCollapsed}
+            events={events}
+            onBack={returnToList}
+            onOpenApprovals={() => onOpenApprovals?.(pendingRequest?.id ?? '')}
+            onToggleDetail={onToggleDetail}
+            pendingRequest={pendingRequest}
+            tab={tab}
+            setTab={setTab}
+          />
+        ) : activeWorkspaceTab === 'detail' ? (
+          <div className="empty-state conversation-detail-empty">
+            <MessageSquareText size={30} />
+            <h3>Selecciona una conversación</h3>
+            <p>Vuelve al listado para elegir el cliente que quieres revisar.</p>
+            <button className="approve-btn compact" type="button" onClick={() => setWorkspaceTab?.('list')}>
+              Ver listado
             </button>
-          ))}
-        </article>
-        <Traceability events={events} conversations={conversationItems} compact />
+          </div>
+        ) : null}
       </div>
     </section>
   );
 }
 
-function ConversationPanel({ conversation, events, onClose, onOpenApprovals, onOpenList, pendingRequest }) {
+function ConversationPanel({
+  conversation,
+  detailCollapsed = false,
+  events,
+  onBack,
+  onClose,
+  onOpenApprovals,
+  onOpenList,
+  onToggleDetail,
+  pendingRequest,
+  tab = 'chat',
+  setTab,
+}) {
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (!panelRef.current) return;
+    panelRef.current.focus({ preventScroll: true });
+  }, [conversation?.id]);
+
   if (!conversation) return null;
   const relevantEvents = events.filter((event) => event.conversationId === conversation.id).slice(0, 3);
   const eventPreview = relevantEvents.length ? relevantEvents : events.slice(0, 3);
@@ -1561,13 +2465,43 @@ function ConversationPanel({ conversation, events, onClose, onOpenApprovals, onO
     ? pendingRequest?.title ?? conversation.humanReason ?? 'Revisar intervención humana'
     : conversation.nextStep;
   const riskLabel = needsHuman ? 'Requiere acción humana' : conversation.status === 'degraded' ? 'Operación degradada' : 'Flujo normal';
+  const waId = pendingRequest?.contextSnapshot?.customerWaId ?? pendingRequest?.context_snapshot?.customerWaId ?? conversation.waId ?? '';
+  const waHref = whatsappHref(waId);
+  const messages = conversationMessages(conversation);
+  const sidePanelHidden = detailCollapsed ? 'is-detail-collapsed' : 'is-detail-expanded';
   return (
-    <aside className="detail-panel operator-panel">
+    <aside
+      ref={panelRef}
+      className={`detail-panel operator-panel whatsapp-thread-panel ${sidePanelHidden} active-tab-${tab}`}
+      tabIndex={-1}
+      role="complementary"
+      aria-label={`Conversación WhatsApp de ${conversation.customer}`}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && onClose) onClose();
+      }}
+    >
+      <span className="sheet-grip" aria-hidden="true" />
       <div className="panel-heading">
-        <span className="eyebrow">Caso seleccionado</span>
+        <span className="eyebrow">Conversación WhatsApp</span>
         <div className="panel-title-row">
+          {onBack && (
+            <button className="ghost-btn compact conversation-back" type="button" onClick={onBack}>
+              ← Atrás
+            </button>
+          )}
           <h2>{conversation.customer}</h2>
           <StatusPill status={conversation.status} />
+          {onToggleDetail && (
+            <button className="ghost-btn compact detail-toggle" type="button" onClick={onToggleDetail} aria-pressed={!detailCollapsed}>
+              {detailCollapsed ? 'Mostrar resumen' : 'Ocultar resumen'}
+            </button>
+          )}
+          {waHref && (
+            <a className="ghost-btn compact whatsapp-header-btn" href={waHref} target="_blank" rel="noreferrer">
+              <Send size={15} />
+              Abrir WhatsApp
+            </a>
+          )}
           {onClose && (
             <button className="icon-btn compact" type="button" title="Cerrar caso" onClick={onClose}>
               <X size={15} />
@@ -1576,58 +2510,89 @@ function ConversationPanel({ conversation, events, onClose, onOpenApprovals, onO
         </div>
       </div>
 
-      <div className="action-card">
-        <span>Próxima acción recomendada</span>
+      {setTab && (
+        <div className="conversation-tabs" role="tablist" aria-label="Vista de conversación">
+          {['chat', 'summary', 'actions'].map((item) => (
+            <button
+              aria-selected={tab === item}
+              className={tab === item ? 'is-active' : ''}
+              key={item}
+              onClick={() => setTab(item)}
+              role="tab"
+              type="button"
+            >
+              {item === 'chat' ? 'Chat' : item === 'summary' ? 'Resumen' : 'Acciones'}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="whatsapp-contact-card conversation-side-card tab-summary tab-actions">
+        <MessageCircle size={20} />
+        <div>
+          <span>{waId || 'Número no registrado'}</span>
+          <strong>{riskLabel}</strong>
+        </div>
+        {waHref && (
+          <a className="ghost-btn compact whatsapp-open-btn" href={waHref} target="_blank" rel="noreferrer">
+            <Send size={15} />
+            Abrir WhatsApp
+          </a>
+        )}
+      </div>
+
+      <div className="action-card whatsapp-action-card conversation-side-card tab-actions">
+        <span>{needsHuman ? 'Necesita atención' : 'Siguiente paso'}</span>
         <strong>{nextAction}</strong>
         <div className="button-row">
-          {needsHuman && (
+          {needsHuman && onOpenApprovals && (
             <button className="approve-btn compact" type="button" onClick={onOpenApprovals}>
               <UserCheck size={16} />
-              Abrir aprobación
+              Resolver solicitud
             </button>
           )}
-          <button className="ghost-btn compact" type="button" onClick={onOpenList}>
-            <MessageSquareText size={16} />
-            Ver lista
-          </button>
+          {onOpenList && (
+            <button className="ghost-btn compact" type="button" onClick={onOpenList}>
+              <MessageSquareText size={16} />
+              Lista de chats
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="operator-stats">
-        <div>
-          <span>Valor</span>
-          <strong>{conversation.value}</strong>
-        </div>
-        <div>
-          <span>Etapa</span>
-          <strong>{stageLabel(conversation.stage)}</strong>
-        </div>
-        <div>
-          <span>Progreso</span>
-          <strong>{conversation.progress}%</strong>
-        </div>
+      <div className="whatsapp-message-list tab-chat" aria-label="Mensajes recientes" aria-live="polite">
+        {messages.map((message) => (
+          <div className={`whatsapp-message is-${message.role}`} key={message.id}>
+            <span>{message.label}</span>
+            <p>{message.text}</p>
+            <small>{formatMessageTime(message.createdAt)}</small>
+          </div>
+        ))}
       </div>
 
-      <div className="progress-block">
-        <div className="progress-track">
-          <span style={{ width: `${conversation.progress}%` }} />
-        </div>
-      </div>
-
-      <div className="info-stack compact-info">
-        <InfoLine icon={Search} label="Objetivo del cliente" value={conversation.need} />
-        <InfoLine icon={PlugZap} label="Evidencia / herramienta" value={toolLabel(conversation.lastTool)} />
-        <InfoLine icon={AlertTriangle} label="Riesgo operativo" value={riskLabel} />
+      <div className="info-stack compact-info conversation-side-card tab-summary">
+        <InfoLine icon={Search} label="Necesidad" value={conversation.need} />
+        <InfoLine icon={ShoppingBag} label="Valor / etapa" value={`${conversation.value} · ${stageLabel(conversation.stage)}`} />
+        <InfoLine icon={PlugZap} label="Herramienta" value={toolLabel(conversation.lastTool)} />
       </div>
 
       {pendingRequest && (
-        <div className="approval-context">
+        <div className="approval-context conversation-side-card tab-actions">
           <strong>{pendingRequest.urgency} · {pendingRequest.type}</strong>
           <span>{pendingRequest.context}</span>
         </div>
       )}
 
-      <div className="event-card operator-events">
+      {needsHuman && onOpenApprovals && (
+        <div className="whatsapp-reply-box conversation-side-card tab-actions">
+          <button className="approve-btn" type="button" onClick={onOpenApprovals}>
+            <Send size={16} />
+            Responder desde solicitud
+          </button>
+        </div>
+      )}
+
+      <div className="event-card operator-events conversation-side-card tab-summary">
         <div className="mini-row">
           <strong>Última actividad</strong>
           <Eye size={16} />
@@ -1642,6 +2607,54 @@ function ConversationPanel({ conversation, events, onClose, onOpenApprovals, onO
   );
 }
 
+function conversationMessages(conversation) {
+  const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+  if (!messages.length) {
+    return [
+      {
+        id: `${conversation.id}-need`,
+        role: 'user',
+        label: 'Cliente',
+        text: conversation.need || 'Conversación recibida por WhatsApp.',
+        createdAt: conversation.updatedAt ?? conversation.createdAt,
+      },
+      {
+        id: `${conversation.id}-next`,
+        role: conversation.status === 'blocked' || conversation.status === 'approval_required' ? 'system' : 'agent',
+        label: conversation.status === 'blocked' || conversation.status === 'approval_required' ? 'Sistema' : 'Agente IA',
+        text: conversation.humanReason || conversation.nextStep || 'El agente está gestionando la conversación.',
+        createdAt: conversation.updatedAt ?? conversation.createdAt,
+      },
+    ];
+  }
+  return messages.slice(-8).map((message) => ({
+    id: message.id ?? `${conversation.id}-${message.createdAt ?? message.text}`,
+    role: message.role === 'human' ? 'human' : message.role === 'user' ? 'user' : message.role === 'system' ? 'system' : 'agent',
+    label: message.role === 'human'
+      ? 'Tienda'
+      : message.role === 'user'
+        ? 'Cliente'
+        : message.role === 'system'
+          ? 'Sistema'
+          : 'Agente IA',
+    text: message.text || `[${message.messageType ?? 'mensaje'}]`,
+    createdAt: message.createdAt,
+  }));
+}
+
+function whatsappHref(waId) {
+  const digits = String(waId ?? '').replace(/\D/g, '');
+  if (!digits) return '';
+  return `https://wa.me/${digits}`;
+}
+
+function formatMessageTime(value) {
+  if (!value) return 'Ahora';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Ahora';
+  return date.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+}
+
 function InfoLine({ icon: Icon, label, value }) {
   return (
     <div className="info-line">
@@ -1654,55 +2667,202 @@ function InfoLine({ icon: Icon, label, value }) {
   );
 }
 
-function HumanQueue({ requests, conversations, onSelectConversation, onResolve, draftReply, setDraftReply }) {
+function humanRequestViewModel(request, conversation) {
+  const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
+  const isDeliveryOrder = request.action === 'prepare_delivery_order'
+    || snapshot.action === 'prepare_delivery_order'
+    || (request.assignedTeam === 'operaciones' && normalizeLabel(request.title).includes('pedido'));
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const itemLines = items.map((item) => ({
+    name: item.name ?? item.catalogQuery ?? 'Producto por validar',
+    quantity: item.quantity ?? 1,
+    total: item.lineTotal ?? null,
+  }));
+  const subtotal = snapshot.subtotal ?? itemLines.reduce((sum, item) => sum + Number(item.total ?? 0), 0);
+  return {
+    isDeliveryOrder,
+    title: isDeliveryOrder ? 'Alistar domicilio' : request.title,
+    task: isDeliveryOrder ? 'Preparar y entregar' : eventTypeLabel(request.type),
+    customer: snapshot.customerName ?? conversation?.customer ?? request.conversationId,
+    address: snapshot.deliveryAddress ?? conversation?.deliveryAddress ?? 'Sin dirección registrada',
+    waId: snapshot.customerWaId ?? conversation?.waId ?? '',
+    orderId: snapshot.orderId ?? conversation?.orderId ?? '',
+    items: itemLines,
+    subtotal,
+    paymentMethod: snapshot.paymentMethod ?? null,
+    context: request.context,
+    consequence: isDeliveryOrder
+      ? 'El tendero toma el pedido para alistarlo. Si falta algo, responde al cliente desde la conversación.'
+      : request.consequence,
+    primaryAction: isDeliveryOrder ? 'Marcar tomado' : 'Aprobar',
+    denyAction: isDeliveryOrder ? 'No puedo alistar' : 'Rechazar',
+  };
+}
+
+function normalizeLabel(value = '') {
+  return String(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function HumanQueue({ requests, conversations, onSelectConversation, onResolve, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '' }) {
+  const [activeQueueTab, setActiveQueueTab] = useState('pending');
+  const selectedRequestRef = useRef(null);
+  const queueRows = requests.map((request) => {
+    const conversation = conversations.find((item) => item.id === request.conversationId);
+    return {
+      request,
+      conversation,
+      view: humanRequestViewModel(request, conversation),
+    };
+  });
+  const deliveryRows = queueRows.filter((row) => row.view.isDeliveryOrder);
+  const responseRows = queueRows.filter((row) => !row.view.isDeliveryOrder);
+  const queueTabs = [
+    ['pending', ListChecks, 'Pendientes', queueRows.length],
+    ['delivery', ShoppingBag, 'Preparar pedidos', deliveryRows.length],
+    ['response', Send, 'Responder cliente', responseRows.length],
+    ['history', BadgeCheck, 'Historial', 0],
+  ];
+  const visibleQueueRows = activeQueueTab === 'delivery'
+    ? deliveryRows
+    : activeQueueTab === 'response'
+      ? responseRows
+      : activeQueueTab === 'history'
+        ? []
+        : queueRows;
+
+  useEffect(() => {
+    if (!selectedRequestId || !selectedRequestRef.current) return;
+    selectedRequestRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    selectedRequestRef.current.focus({ preventScroll: true });
+  }, [selectedRequestId]);
+
+  useEffect(() => {
+    if (!selectedRequestId) return;
+    const selectedRow = queueRows.find((row) => row.request.id === selectedRequestId);
+    if (!selectedRow) return;
+    setActiveQueueTab(selectedRow.view.isDeliveryOrder ? 'delivery' : 'response');
+  }, [selectedRequestId, requests]);
+
   return (
     <section className="queue-layout">
-      <div className="section-title">
-        <span className="eyebrow">Aprobaciones</span>
-        <h2>Bandeja priorizada de intervención humana</h2>
+      <div className="section-title split-title queue-titlebar">
+        <div>
+          <span className="eyebrow">Aprobaciones</span>
+          <h2>Bandeja priorizada de intervención humana</h2>
+        </div>
+        <div className="workspace-tabs compact-tabs" role="tablist" aria-label="Tipos de aprobaciones">
+          {queueTabs.map(([key, Icon, label, count]) => (
+            <button
+              aria-selected={activeQueueTab === key}
+              className={activeQueueTab === key ? 'is-active' : ''}
+              key={key}
+              onClick={() => setActiveQueueTab(key)}
+              role="tab"
+              type="button"
+            >
+              <Icon size={16} />
+              <span>{label}</span>
+              <b>{count}</b>
+            </button>
+          ))}
+        </div>
       </div>
       <div className="queue-grid">
-        {requests.length === 0 && (
+        {visibleQueueRows.length === 0 && (
           <article className="empty-state">
-            <BadgeCheck size={28} />
-            <h3>Sin pendientes humanos</h3>
-            <p>Las solicitudes resueltas emiten eventos de aprobación o rechazo y liberan el flujo del agente.</p>
+            {activeQueueTab === 'history' ? <Clock3 size={28} /> : <BadgeCheck size={28} />}
+            <h3>{activeQueueTab === 'history' ? 'Historial pendiente de consolidar' : 'Sin pendientes para este filtro'}</h3>
+            <p>{activeQueueTab === 'history' ? 'Cuando se persistan resoluciones recientes, aparecerán aquí como solo lectura.' : 'Cambia de tab o espera nuevas solicitudes humanas del agente.'}</p>
           </article>
         )}
-        {requests.map((request) => {
-          const conversation = conversations.find((item) => item.id === request.conversationId);
+        {visibleQueueRows.map(({ request, conversation, view }) => {
+          const isSelected = request.id === selectedRequestId;
           return (
-            <article className="request-card" key={request.id}>
+            <article
+              className={`request-card ${view.isDeliveryOrder ? 'is-delivery-order' : ''} ${isSelected ? 'is-selected' : ''}`}
+              data-request-id={request.id}
+              data-conversation-id={request.conversationId}
+              key={request.id}
+              ref={isSelected ? selectedRequestRef : null}
+              tabIndex={isSelected ? -1 : undefined}
+            >
               <div className="request-top">
                 <span className={`urgency urgency-${request.urgency.toLowerCase()}`}>{request.urgency}</span>
-                <code>{eventTypeLabel(request.type)}</code>
+                <span className="request-kind">{view.task}</span>
               </div>
-              <h3>{request.title}</h3>
-              <p>{request.context}</p>
-              <div className="impact-box">
-                <strong>Después de responder</strong>
-                <span>{request.consequence}</span>
+              <h3>{view.title}</h3>
+              {view.isDeliveryOrder ? (
+                <div className="delivery-brief">
+                  <div className="delivery-main">
+                    <ShoppingBag size={20} />
+                    <div>
+                      <span>Pedido</span>
+                      <strong>{view.orderId || 'Pedido confirmado'}</strong>
+                    </div>
+                    <b>{formatCurrency(view.subtotal)}</b>
+                  </div>
+                  <div className="delivery-items">
+                    {view.items.slice(0, 5).map((item, index) => (
+                      <div key={`${item.name}-${index}`}>
+                        <strong>{item.quantity}x</strong>
+                        <span>{item.name}</span>
+                      </div>
+                    ))}
+                    {view.items.length > 5 && <em>+ {view.items.length - 5} producto(s) más</em>}
+                  </div>
+                  <div className="delivery-destination">
+                    <InfoLine icon={UserCheck} label="Cliente" value={view.customer} />
+                    <InfoLine icon={Store} label="Entrega" value={view.address} />
+                    {view.paymentMethod && <InfoLine icon={CircleDollarSign} label="Pago" value={view.paymentMethod} />}
+                  </div>
+                </div>
+              ) : (
+                <p className="request-summary">{view.context}</p>
+              )}
+              <div className="impact-box request-next-step">
+                <strong>{view.isDeliveryOrder ? 'Qué debe hacer' : 'Después de responder'}</strong>
+                <span>{view.consequence}</span>
               </div>
               <div className="mini-row">
                 <button className="text-btn" type="button" onClick={() => onSelectConversation(request.conversationId)}>
-                  Ver {conversation?.customer ?? request.conversationId}
+                  Abrir conversación WhatsApp
                 </button>
-                <span>{request.conversationId}</span>
+                <span>{view.waId || request.conversationId}</span>
               </div>
-              <textarea value={draftReply} onChange={(event) => setDraftReply(event.target.value)} rows={3} />
+              {!view.isDeliveryOrder && (
+                <>
+                  <textarea value={draftReply} onChange={(event) => setDraftReply(event.target.value)} rows={2} placeholder="Respuesta corta para el cliente o nota interna" />
+                  <label className="select-filter human-reply-mode">
+                    <Send size={16} />
+                    <select value={replyMode} onChange={(event) => setReplyMode(event.target.value)}>
+                      <option value="whatsapp">Enviar por WhatsApp</option>
+                      <option value="platform">Guardar en plataforma</option>
+                    </select>
+                  </label>
+                </>
+              )}
               <div className="button-row">
-                <button className="approve-btn" type="button" onClick={() => onResolve(request.id, 'approved')}>
+                <button className="approve-btn" type="button" onClick={() => onResolve(request.id, 'approved', { responseMode: 'none' })}>
                   <Check size={16} />
-                  Aprobar
+                  {view.primaryAction}
                 </button>
-                <button className="deny-btn" type="button" onClick={() => onResolve(request.id, 'denied')}>
+                <button className="deny-btn" type="button" onClick={() => onResolve(request.id, 'denied', { responseMode: 'none' })}>
                   <X size={16} />
-                  Rechazar
+                  {view.denyAction}
                 </button>
-                <button className="ghost-btn compact" type="button" onClick={() => onResolve(request.id, 'approved')}>
-                  <Send size={16} />
-                  Responder
-                </button>
+                {!view.isDeliveryOrder && (
+                  <button
+                    className="ghost-btn compact"
+                    type="button"
+                    onClick={() => onResolve(request.id, 'approved', { responseMode: replyMode, note: draftReply })}
+                  >
+                    <Send size={16} />
+                    {replyMode === 'whatsapp' ? 'Enviar por WhatsApp' : 'Guardar nota'}
+                  </button>
+                )}
               </div>
             </article>
           );
@@ -1712,8 +2872,16 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
   );
 }
 
+function onboardingTabForStep(step) {
+  if (['subscription', 'billing-checkout', 'billing-continue', 'billing-cancel'].includes(step)) return 'billing';
+  if (['google_oauth', 'google_provisioning', 'provision'].includes(step)) return 'google';
+  if (step === 'whatsapp') return 'whatsapp';
+  return 'route';
+}
+
 function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
+  const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
   const next = nextOnboardingAction(status);
@@ -1758,6 +2926,57 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
       state: 'ok',
     },
   ];
+  const onboardingTabs = [
+    ['route', ShieldCheck, 'Ruta', `${completeCount}/${checks.length}`],
+    ['billing', CircleDollarSign, 'Pago', humanState(subscription?.status) ?? 'Pendiente'],
+    ['google', Database, 'Google', googleConnection?.accountEmail ? 'Conectado' : 'Pendiente'],
+    ['whatsapp', MessageCircle, 'WhatsApp', tenant.config?.whatsapp?.phoneNumberId ? 'Conectado' : 'Pendiente'],
+    ['test', Play, 'Prueba', status.readyForOperation ? 'Lista' : 'Pendiente'],
+  ];
+  const googleConnected = Boolean(googleConnection?.accountEmail || googleConnection?.status === 'connected');
+  const googleProvisioned = Boolean(
+    workspace?.spreadsheet?.id || workspace?.status === 'provisioned' || workspace?.status === 'ready',
+  );
+  const googleSetupSteps = [
+    {
+      key: 'authorize',
+      icon: UserCheck,
+      title: 'Autorizar Drive y Sheets',
+      detail: 'El dueño entra con la cuenta Google de la tienda y aprueba permisos para crear archivos operativos.',
+      done: googleConnected,
+      status: googleConnected ? 'sandbox_ready' : 'needs_binding',
+      statusText: googleConnected ? 'Cuenta conectada' : 'Pendiente',
+      action: 'google-oauth',
+      actionLabel: googleConnected ? 'Reconectar Google' : 'Conectar Google',
+      disabled: false,
+    },
+    {
+      key: 'provision',
+      icon: Database,
+      title: 'Crear estructura en Drive',
+      detail: 'La plataforma crea la carpeta de la tienda y el Google Sheet con catalogo, clientes y pedidos.',
+      done: googleProvisioned,
+      status: googleProvisioned ? 'sandbox_ready' : googleConnected ? 'approval_required' : 'needs_binding',
+      statusText: googleProvisioned ? 'Estructura creada' : googleConnected ? 'Lista para crear' : 'Esperando cuenta',
+      action: googleProvisioned ? null : 'provision',
+      actionLabel: 'Crear Drive y Sheets',
+      disabled: !googleConnected,
+    },
+    {
+      key: 'complete',
+      icon: ShoppingBag,
+      title: 'Completar datos base',
+      detail: 'El usuario abre la hoja, completa catalogo, stock, clientes frecuentes y valida que la tienda pueda operar.',
+      done: googleProvisioned,
+      status: googleProvisioned ? 'sandbox_ready' : 'needs_binding',
+      statusText: googleProvisioned ? 'Lista para editar' : 'Despues de crear estructura',
+      disabled: !googleProvisioned,
+    },
+  ];
+
+  useEffect(() => {
+    setActiveOnboardingTab(onboardingTabForStep(status.nextStep));
+  }, [status.nextStep, tenant.id]);
 
   return (
     <section className="onboarding-layout">
@@ -1803,13 +3022,34 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
         ))}
       </div>
 
-      <BillingOwnerPanel
-        billing={billingStatus}
-        busyAction={busyAction}
-        onAction={onAction}
-        subscription={subscription}
-      />
+      <div className="workspace-tabs onboarding-tabs" role="tablist" aria-label="Etapas de activación">
+        {onboardingTabs.map(([key, Icon, label, detail]) => (
+          <button
+            aria-selected={activeOnboardingTab === key}
+            className={activeOnboardingTab === key ? 'is-active' : ''}
+            key={key}
+            onClick={() => setActiveOnboardingTab(key)}
+            role="tab"
+            type="button"
+          >
+            <Icon size={16} />
+            <span>{label}</span>
+            <small>{detail}</small>
+          </button>
+        ))}
+      </div>
 
+      {activeOnboardingTab === 'billing' && (
+        <BillingOwnerPanel
+          billing={billingStatus}
+          busyAction={busyAction}
+          onAction={onAction}
+          subscription={subscription}
+        />
+      )}
+
+      {activeOnboardingTab === 'route' && (
+      <>
       <div className="guided-grid">
         <article className="guide-panel next-step-panel">
           <span className="eyebrow">Siguiente paso recomendado</span>
@@ -1888,7 +3128,10 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
           ))}
         </div>
       </article>
+      </>
+      )}
 
+      {activeOnboardingTab === 'test' && (
       <article className="guide-panel test-drive-panel">
         <div>
           <span className="eyebrow">Prueba guiada</span>
@@ -1923,7 +3166,9 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
           </button>
         </div>
       </article>
+      )}
 
+      {activeOnboardingTab === 'whatsapp' && (
       <WhatsAppActivationWizard
         busyAction={busyAction}
         onboarding={whatsappOnboarding}
@@ -1931,35 +3176,94 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
         onOpenConfig={() => onNavigate('config')}
         tenant={tenant}
       />
+      )}
 
-      <div className="onboarding-grid">
-        <article className="guide-panel">
-          <span className="eyebrow">Recursos Google</span>
-          <h3>Información operativa del cliente</h3>
-          <div className="resource-list">
+      {activeOnboardingTab === 'google' && (
+      <div className="google-onboarding-grid">
+        <article className="guide-panel google-guide-panel">
+          <div>
+            <span className="eyebrow">Conectar Google Drive</span>
+            <h3>Guía para dejar Drive y Sheets listos</h3>
+            <p>
+              Este paso conecta la cuenta Google del cliente, crea la estructura operativa en su Drive
+              y deja una hoja editable para catálogo, clientes y pedidos.
+            </p>
+          </div>
+
+          <div className="google-step-stack">
+            {googleSetupSteps.map((step, index) => {
+              const StepIcon = step.icon;
+              return (
+                <article className={`google-step-card ${step.done ? 'is-done' : step.disabled ? 'is-locked' : 'is-current'}`} key={step.key}>
+                  <div className="google-step-index">{step.done ? <Check size={15} /> : index + 1}</div>
+                  <div className="google-step-body">
+                    <div className="google-step-heading">
+                      <StepIcon size={18} />
+                      <div>
+                        <strong>{step.title}</strong>
+                        <span>{step.statusText}</span>
+                      </div>
+                      <StatusPill status={step.status} />
+                    </div>
+                    <p>{step.detail}</p>
+                    {step.action && (
+                      <button
+                        className={step.done ? 'ghost-btn' : 'approve-btn'}
+                        disabled={step.disabled || Boolean(busyAction)}
+                        onClick={() => onAction(step.action)}
+                        type="button"
+                      >
+                        {step.done ? <RotateCcw size={16} /> : <Check size={16} />}
+                        {busyAction === step.action ? 'Procesando' : step.actionLabel}
+                      </button>
+                    )}
+                    {step.key === 'complete' && (
+                      <div className="google-action-row">
+                        {workspace?.spreadsheet?.url && (
+                          <a className="approve-btn" href={workspace.spreadsheet.url} target="_blank" rel="noreferrer">
+                            <Database size={16} />
+                            Abrir Google Sheets
+                          </a>
+                        )}
+                        <button className="ghost-btn" onClick={() => onNavigate('config')} type="button">
+                          <Settings2 size={16} />
+                          Editar configuración Google
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </article>
+
+        <article className="guide-panel google-result-panel">
+          <div>
+            <span className="eyebrow">Recursos del cliente</span>
+            <h3>{googleProvisioned ? 'Drive operativo creado' : 'Estructura pendiente'}</h3>
+            <p>
+              Cada tienda mantiene sus archivos en su propio Google. La plataforma guarda referencias
+              por tenant y valida permisos antes de habilitar la operación.
+            </p>
+          </div>
+          <div className="resource-list compact-resource-list">
             <ResourceRow icon={UserCheck} label="Cuenta" value={googleConnection?.accountEmail ?? 'Pendiente'} />
             <ResourceRow icon={Database} label="Google Sheets" value={workspace?.spreadsheet?.id ?? 'Pendiente'} />
             <ResourceRow icon={ShoppingBag} label="Catálogo" value={workspace?.sheets?.catalog ?? 'Catalogo'} />
-            <ResourceRow icon={MessageCircle} label="Clientes" value={tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500'} />
+            <ResourceRow icon={MessageCircle} label="Clientes" value={tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:H1000'} />
+            <ResourceRow icon={CircleDollarSign} label="Pedidos" value={tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:M1000'} />
           </div>
-          {workspace?.spreadsheet?.url && (
-            <a className="text-link" href={workspace.spreadsheet.url} target="_blank" rel="noreferrer">
-              Abrir Google Sheets
-            </a>
-          )}
-        </article>
-
-        <article className="guide-panel">
-          <span className="eyebrow">Aislamiento por cliente</span>
-          <h3>Credenciales y motor separados</h3>
-          <div className="resource-list">
-            <ResourceRow icon={MessageCircle} label="Identificador WhatsApp" value={tenant.config?.whatsapp?.phoneNumberId ?? 'Pendiente'} />
-            <ResourceRow icon={KeyRound} label="Referencia segura WhatsApp" value={tenant.config?.whatsapp?.accessTokenRef ?? 'Referencia pendiente'} />
-            <ResourceRow icon={Bot} label="Motor IA" value="DeepSeek administrado por la plataforma" />
-            <ResourceRow icon={ShieldCheck} label="Acceso" value={humanState(tenant.lifecycle?.access) ?? 'Pendiente'} />
+          <div className="google-note">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>Qué debe hacer el usuario</strong>
+              <span>Autorizar Google, crear la hoja y completar catálogo/stock. WhatsApp se configura en su propia pestaña.</span>
+            </div>
           </div>
         </article>
       </div>
+      )}
     </section>
   );
 }
@@ -1977,6 +3281,8 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
   const canStart = billing?.actions?.canStartCheckout;
   const status = activeSubscription?.status ?? 'pending_payment';
   const nextDate = activeSubscription?.nextBillingDate ?? activeSubscription?.currentPeriodEnd;
+  const notices = billing?.notices ?? [];
+  const paymentHistory = billing?.paymentHistory ?? payments;
   return (
     <article className="billing-owner-panel">
       <div className="billing-owner-copy">
@@ -1993,6 +3299,19 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
         <UsageMiniBar label="Domicilios" value={deliveriesUsed} limit={includedDeliveries} />
         <UsageMiniBar label="Interacciones" value={interactionsUsed} limit={includedInteractions} />
       </div>
+      {notices.length > 0 && (
+        <div className="billing-notice-list">
+          {notices.slice(0, 3).map((notice) => (
+            <div className={`billing-notice is-${notice.tone}`} key={notice.key}>
+              <AlertTriangle size={15} />
+              <div>
+                <strong>{notice.title}</strong>
+                <span>{notice.message}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="billing-owner-actions">
         {canContinue ? (
           <button className="approve-btn compact" type="button" onClick={() => onAction('billing-continue')} disabled={Boolean(busyAction)}>
@@ -2012,9 +3331,21 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
         )}
         <div className="billing-payment-preview">
           <span>Último pago</span>
-          <strong>{payments[0] ? `${humanState(payments[0].status)} · ${formatDateShort(payments[0].paidAt)}` : 'Sin pagos confirmados'}</strong>
+          <strong>{paymentHistory[0] ? `${humanState(paymentHistory[0].status)} · ${formatDateShort(paymentHistory[0].paidAt)}` : 'Sin pagos confirmados'}</strong>
+          {paymentHistory[0]?.receiptLabel && <small>{paymentHistory[0].receiptLabel}</small>}
         </div>
       </div>
+      {paymentHistory.length > 1 && (
+        <div className="billing-history-list">
+          {paymentHistory.slice(0, 3).map((payment) => (
+            <span key={payment.id}>
+              <b>{humanState(payment.status)}</b>
+              {formatDateShort(payment.paidAt)}
+              <em>{formatCurrency(payment.amount, payment.currency)}</em>
+            </span>
+          ))}
+        </div>
+      )}
     </article>
   );
 }
@@ -2088,7 +3419,7 @@ function onboardingDetailLabel(check) {
 
 function whatsappPathLabel(value) {
   const labels = {
-    cloud_api_existing: 'Ya tiene Cloud API',
+    cloud_api_existing: 'Ya tiene integración oficial',
     business_app_existing: 'Tiene WhatsApp Business App',
     new_business: 'Empieza desde cero',
   };
@@ -2109,7 +3440,7 @@ function whatsappStepLabel(step) {
 
 function whatsappStepDetail(step) {
   const details = {
-    diagnosis: 'Preguntar si ya tiene WhatsApp Business, Cloud API o empieza desde cero.',
+    diagnosis: 'Preguntar si ya tiene WhatsApp Business, integración oficial o empieza desde cero.',
     meta_auth: 'Guiar al cliente en Meta Business hasta habilitar la cuenta.',
     business: 'Seleccionar o crear la cuenta WhatsApp del cliente, negocio, nombre visible y categoría.',
     phone: 'Validar el número del cliente, recibir el código y obtener el identificador del número.',
@@ -2140,7 +3471,7 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
   const paths = [
     {
       key: 'cloud_api_existing',
-      title: 'Ya tiene Cloud API',
+      title: 'Ya tiene integración oficial',
       detail: 'Conectamos la cuenta, el número y la referencia segura del negocio existente.',
       hasWhatsAppBusiness: true,
     },
@@ -2283,19 +3614,19 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
 function fallbackOnboardingStatus(tenant) {
   const checks = [
     { key: 'subscription', label: 'Suscripcion activa en Mercado Pago', ok: false, detail: 'Sin datos del backend SaaS' },
-    { key: 'google_oauth', label: 'OAuth Google conectado', ok: false, detail: 'Sin datos del backend SaaS' },
+    { key: 'google_oauth', label: 'Google conectado', ok: false, detail: 'Sin datos del backend SaaS' },
     { key: 'google_provisioning', label: 'Drive y Sheets aprovisionados', ok: false, detail: 'Sin datos del backend SaaS' },
     {
       key: 'llm',
       label: 'DeepSeek global de plataforma',
       ok: true,
-      detail: 'deepseek-chat',
+      detail: 'Motor listo',
     },
     {
       key: 'whatsapp',
       label: 'WhatsApp separado por tienda',
       ok: Boolean(tenant.config?.whatsapp?.phoneNumberId),
-      detail: tenant.config?.whatsapp?.phoneNumberId ?? 'missing',
+      detail: tenant.config?.whatsapp?.phoneNumberId ? 'Número conectado' : 'missing',
     },
   ];
   return {
@@ -2323,7 +3654,7 @@ function fallbackWhatsAppOnboarding(tenant) {
       accessTokenRef: tenant.config?.whatsapp?.accessTokenRef ?? null,
     },
     steps: [
-      { key: 'diagnosis', label: 'Diagnóstico', status: phoneNumberId ? 'done' : 'current', detail: 'Definir si el cliente ya tiene WhatsApp Business, Cloud API o empieza desde cero.' },
+      { key: 'diagnosis', label: 'Diagnóstico', status: phoneNumberId ? 'done' : 'current', detail: 'Definir si el cliente ya tiene WhatsApp Business, integración oficial o empieza desde cero.' },
       { key: 'meta_auth', label: 'Autorización Meta', status: phoneNumberId ? 'done' : 'locked', detail: 'Conectar o guiar al dueño en Meta Business.' },
       { key: 'business', label: 'Cuenta WhatsApp', status: phoneNumberId ? 'done' : 'locked', detail: 'Seleccionar o crear la cuenta WhatsApp del cliente.' },
       { key: 'phone', label: 'Número y código', status: phoneNumberId ? 'done' : 'locked', detail: 'Obtener el identificador del número activo.' },
@@ -2345,7 +3676,7 @@ function onboardingStepMeta(key) {
       short: 'Pago de plataforma',
       description: 'Confirma que la tienda tiene derecho de uso mensual antes de operar.',
       why: 'Evita entregar servicio a clientes vencidos o sin plan activo.',
-      needs: 'Pago activo o activación sandbox para pruebas locales.',
+      needs: 'Pago activo o activación de prueba local.',
     },
     google_oauth: {
       icon: UserCheck,
@@ -2353,7 +3684,7 @@ function onboardingStepMeta(key) {
       short: 'Permisos del cliente',
       description: 'Autoriza Drive y Sheets de la tienda con OAuth seguro.',
       why: 'Los datos operativos viven en el Google del cliente, no mezclados en la plataforma.',
-      needs: 'Cuenta Google del dueño y consentimiento OAuth.',
+      needs: 'Cuenta Google del dueño y autorización segura.',
     },
     google_provisioning: {
       icon: Database,
@@ -2361,7 +3692,7 @@ function onboardingStepMeta(key) {
       short: 'Estructura operativa',
       description: 'Genera catálogo, clientes, pedidos y configuración inicial.',
       why: 'El agente necesita una fuente viva para consultar productos y registrar pedidos.',
-      needs: 'OAuth conectado y permisos de Drive/Sheets vigentes.',
+      needs: 'Google conectado y permisos de Drive/Sheets vigentes.',
     },
     llm: {
       icon: Bot,
@@ -2392,7 +3723,7 @@ function onboardingStepMeta(key) {
 
 function onboardingStepAction(key) {
   const action = {
-    subscription: { key: 'subscription', label: 'Activar sandbox', icon: <CircleDollarSign size={15} /> },
+    subscription: { key: 'subscription', label: 'Activar prueba local', icon: <CircleDollarSign size={15} /> },
     google_oauth: { key: 'google-oauth', label: 'Conectar Google', icon: <UserCheck size={15} /> },
     google_provisioning: { key: 'provision', label: 'Provisionar', icon: <Database size={15} /> },
     llm: { key: 'config-llm', label: 'Configurar', icon: <Bot size={15} /> },
@@ -2421,7 +3752,7 @@ function nextOnboardingAction(status) {
   const stepAction = onboardingStepAction(status.nextStep);
   const titles = {
     subscription: ['Validar suscripción', 'El acceso depende del pago mensual de la plataforma en Mercado Pago.'],
-    google_oauth: ['Conectar Google', 'La microapp necesita autorización OAuth para crear y leer los archivos del cliente.'],
+    google_oauth: ['Conectar Google', 'La microapp necesita autorización segura para crear y leer los archivos del cliente.'],
     google_provisioning: ['Crear estructura Google', 'Se deben aprovisionar Drive y Google Sheets con catálogo, clientes y pedidos.'],
     llm: ['Revisar Motor IA de la plataforma', 'El motor se administra desde Centro de control y se consume transversalmente.'],
     whatsapp: ['Separar WhatsApp por tienda', 'La conexión solo debe aceptar mensajes del identificador configurado para esta tienda.'],
@@ -2437,6 +3768,7 @@ function nextOnboardingAction(status) {
 }
 
 function AnalyticsView({ conversations: conversationItems, events, requests: requestItems, tools: toolItems, usage }) {
+  const [activeAnalyticsTab, setActiveAnalyticsTab] = useState('usage');
   const stages = ['catalog', 'approval', 'handoff', 'binding', 'payment', 'off_hours'];
   const activeCount = conversationItems.filter((conversation) => conversation.status === 'live').length;
   const blockedCount = conversationItems.filter((conversation) => ['blocked', 'degraded', 'needs_binding'].includes(conversation.status)).length;
@@ -2464,6 +3796,12 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
     .map(([type, count]) => ({ type, label: eventTypeLabel(type), count }))
     .sort((left, right) => right.count - left.count)
     .slice(0, 4);
+  const analyticsTabs = [
+    ['usage', ShoppingBag, 'Uso', formatUsageRatio(usage.metrics.deliveries_confirmed, usage.limits.includedDeliveries)],
+    ['flow', Activity, 'Flujo', `${avgProgress}% avance`],
+    ['risks', AlertTriangle, 'Riesgos', blockedCount ? `${blockedCount} alertas` : 'Sin bloqueos'],
+    ['events', PlugZap, 'Eventos', `${events.length} recientes`],
+  ];
 
   return (
     <section className="analytics-layout">
@@ -2485,7 +3823,24 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
         <AnalyticsSignal icon={ShoppingBag} label="Pedidos avanzados" value={completedCount} detail={`${avgProgress}% avance promedio`} tone="blue" />
         <AnalyticsSignal icon={PlugZap} label="Conexiones pendientes" value={pendingTools} detail={`${connectedTools}/${toolItems.length} operativas`} tone="coral" />
       </div>
+      <div className="workspace-tabs analytics-tabs" role="tablist" aria-label="Secciones de analítica">
+        {analyticsTabs.map(([key, Icon, label, detail]) => (
+          <button
+            aria-selected={activeAnalyticsTab === key}
+            className={activeAnalyticsTab === key ? 'is-active' : ''}
+            key={key}
+            onClick={() => setActiveAnalyticsTab(key)}
+            role="tab"
+            type="button"
+          >
+            <Icon size={16} />
+            <span>{label}</span>
+            <small>{detail}</small>
+          </button>
+        ))}
+      </div>
       <div className="analytics-grid">
+        {activeAnalyticsTab === 'usage' && (
         <article className="analytics-panel usage-focus-panel">
           <div className="panel-heading">
             <span className="eyebrow">Capacidad mensual</span>
@@ -2506,6 +3861,8 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
             </div>
           </div>
         </article>
+        )}
+        {activeAnalyticsTab === 'flow' && (
         <article className="analytics-panel stage-flow-panel span-2">
           <div className="panel-heading">
             <span className="eyebrow">Flujo comercial</span>
@@ -2521,6 +3878,8 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
             ))}
           </div>
         </article>
+        )}
+        {activeAnalyticsTab === 'usage' && (
         <article className="analytics-panel">
           <div className="panel-heading">
             <span className="eyebrow">Conexiones</span>
@@ -2535,6 +3894,8 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
             ))}
           </div>
         </article>
+        )}
+        {activeAnalyticsTab === 'events' && (
         <article className="analytics-panel events-panel">
           <div className="panel-heading">
             <span className="eyebrow">Ritmo reciente</span>
@@ -2550,6 +3911,8 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
             {!topEvents.length && <p className="muted-copy">Aún no hay eventos para analizar en esta tienda.</p>}
           </div>
         </article>
+        )}
+        {activeAnalyticsTab === 'risks' && (
         <article className="analytics-panel risk-panel">
           <div className="panel-heading">
             <span className="eyebrow">Riesgos</span>
@@ -2570,6 +3933,7 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
             )}
           </div>
         </article>
+        )}
       </div>
     </section>
   );
@@ -2605,8 +3969,26 @@ function CapacityRing({ label, limit, percent, value }) {
   );
 }
 
-function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveSettings }) {
+function RestrictedAdminPanel() {
+  return (
+    <article className="admin-hero">
+      <div>
+        <span className="eyebrow">Consola protegida</span>
+        <h2>Centro de control de plataforma</h2>
+        <p>Esta vista queda reservada para administradores de plataforma. Para la tienda activa, usa Resumen, Tienda viva, Conversaciones, Onboarding o Aprobaciones.</p>
+      </div>
+      <div className="admin-stat-card">
+        <span>Acceso</span>
+        <strong>Tienda</strong>
+        <small>Sin llamadas admin en segundo plano</small>
+      </div>
+    </article>
+  );
+}
+
+function PlatformAdminView({ auth, error, overview, onOpenObservability, onRefresh, onSaveSettings }) {
   const llm = overview?.platform?.llm ?? {};
+  const [activeAdminTab, setActiveAdminTab] = useState('llm');
   const [llmDraft, setLlmDraft] = useState(() => ({
     model: llm.model ?? 'deepseek-chat',
     apiKeyRef: llm.apiKeyRef ?? 'DEEPSEEK_API_KEY',
@@ -2640,8 +4022,8 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
     if (!silent) setBillingAdmin((current) => ({ ...current, loading: true, error: '' }));
     try {
       const [plansResponse, funnelResponse] = await Promise.all([
-        appFetch('/api/admin/billing/plans', { credentials: 'include' }),
-        appFetch('/api/admin/billing/funnel', { credentials: 'include' }),
+        fetch('/api/admin/billing/plans', { credentials: 'include' }),
+        fetch('/api/admin/billing/funnel', { credentials: 'include' }),
       ]);
       if (!plansResponse.ok || !funnelResponse.ok) throw new Error('No fue posible leer facturación');
       const [plansPayload, funnelPayload] = await Promise.all([plansResponse.json(), funnelResponse.json()]);
@@ -2683,26 +4065,30 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
     };
   }, []);
 
-  async function runBillingAdminAction(action, tenantId) {
+  async function runBillingAdminAction(action, tenantId, resourceId) {
     if (action !== 'jobs' && !tenantId) return;
-    const actionKey = action === 'jobs' ? 'jobs:platform' : `${action}:${tenantId}`;
+    const actionKey = action === 'jobs' ? 'jobs:platform' : `${action}:${tenantId}${resourceId ? `:${resourceId}` : ''}`;
     const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
     const routes = {
       jobs: '/api/admin/billing/jobs/run',
       sync: `/api/admin/billing/tenants/${tenantId}/sync`,
       exception: `/api/admin/billing/tenants/${tenantId}/exceptions`,
       discount: `/api/admin/billing/tenants/${tenantId}/discounts`,
+      revokeException: `/api/admin/billing/tenants/${tenantId}/exceptions/${resourceId}/revoke`,
+      revokeDiscount: `/api/admin/billing/tenants/${tenantId}/discounts/${resourceId}/revoke`,
     };
     const bodies = {
       jobs: {},
       sync: {},
       exception: { reason: 'Soporte comercial temporal', expiresAt },
       discount: { discountValue: 20, reason: 'Ajuste comercial piloto', expiresAt },
+      revokeException: {},
+      revokeDiscount: {},
     };
     try {
       setBillingAction(actionKey);
-      const response = await appFetch(routes[action], {
-        method: 'POST',
+      const response = await fetch(routes[action], {
+        method: action.startsWith('revoke') ? 'PATCH' : 'POST',
         headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
         credentials: 'include',
         body: JSON.stringify(bodies[action] ?? {}),
@@ -2710,8 +4096,8 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
       if (!response.ok) throw new Error('No fue posible aplicar la acción');
       const actionPayload = await response.json().catch(() => null);
       const [plansResponse, funnelResponse] = await Promise.all([
-        appFetch('/api/admin/billing/plans', { credentials: 'include' }),
-        appFetch('/api/admin/billing/funnel', { credentials: 'include' }),
+        fetch('/api/admin/billing/plans', { credentials: 'include' }),
+        fetch('/api/admin/billing/funnel', { credentials: 'include' }),
       ]);
       if (!plansResponse.ok || !funnelResponse.ok) throw new Error('La acción se aplicó, pero no fue posible refrescar facturación');
       const [plansPayload, funnelPayload] = await Promise.all([plansResponse.json(), funnelResponse.json()]);
@@ -2723,6 +4109,7 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
         error: '',
         lastJob: action === 'jobs' ? actionPayload : current.lastJob,
       }));
+      onRefresh?.();
     } catch (actionError) {
       setBillingAdmin((current) => ({
         ...current,
@@ -2753,7 +4140,7 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
     };
     try {
       setBillingAction(actionKey);
-      const response = await appFetch(isNew ? '/api/admin/billing/plans' : `/api/admin/billing/plans/${planId}`, {
+      const response = await fetch(isNew ? '/api/admin/billing/plans' : `/api/admin/billing/plans/${planId}`, {
         method: isNew ? 'POST' : 'PATCH',
         headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
         credentials: 'include',
@@ -2778,6 +4165,12 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
   const maxWebhooks = Math.max(1, ...tenants.map((tenant) => Number(tenant.webhooks?.total ?? 0)));
   const selectedInteractions = Number(selectedTenant?.usage?.metrics?.agent_interactions ?? 0);
   const selectedTokens = Number(selectedTenant?.usage?.metrics?.llm_total_tokens ?? 0);
+  const adminTabs = [
+    ['llm', Bot, 'Motor IA', llm.configured ? 'Producción' : 'Pendiente'],
+    ['tenants', Users, 'Clientes', `${tenants.length} tenants`],
+    ['billing', CircleDollarSign, 'Facturación', `${totals.paymentBlocked ?? 0} riesgo`],
+    ['observability', Activity, 'Observabilidad', `${webhookSummary.total ?? 0} eventos`],
+  ];
   return (
     <section className="admin-layout">
       <div className="admin-hero">
@@ -2801,7 +4194,25 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
         </div>
       )}
 
+      <div className="workspace-tabs admin-tabs" role="tablist" aria-label="Secciones del centro de control">
+        {adminTabs.map(([key, Icon, label, detail]) => (
+          <button
+            aria-selected={activeAdminTab === key}
+            className={activeAdminTab === key ? 'is-active' : ''}
+            key={key}
+            onClick={() => setActiveAdminTab(key)}
+            role="tab"
+            type="button"
+          >
+            <Icon size={16} />
+            <span>{label}</span>
+            <small>{detail}</small>
+          </button>
+        ))}
+      </div>
+
       <div className="admin-grid">
+        {activeAdminTab === 'llm' && (
         <article className="admin-panel llm-control-panel">
           <div className="panel-heading-inline">
             <div>
@@ -2822,14 +4233,14 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
             <label className="config-field">
               <span>
                 <KeyRound size={16} />
-                API key ref
+                Referencia segura
               </span>
               <input value={llmDraft.apiKeyRef} onChange={(event) => setLlmDraft((current) => ({ ...current, apiKeyRef: event.target.value }))} />
             </label>
             <label className="config-field">
               <span>
                 <Database size={16} />
-                Base URL ref
+                Referencia del endpoint
               </span>
               <input value={llmDraft.baseUrlRef} onChange={(event) => setLlmDraft((current) => ({ ...current, baseUrlRef: event.target.value }))} />
             </label>
@@ -2841,20 +4252,20 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
               <select value={llmDraft.simulator ?? ''} onChange={(event) => setLlmDraft((current) => ({ ...current, simulator: event.target.value }))}>
                 <option value="codex">Codex simula DeepSeek</option>
                 <option value="codex_cli">Codex CLI local</option>
-                <option value="">API real</option>
+                <option value="">Proveedor real</option>
               </select>
             </label>
             <label className="config-field">
               <span>
                 <Layers3 size={16} />
-                Max tokens
+                Límite de respuesta
               </span>
               <input type="number" value={llmDraft.maxTokens} onChange={(event) => setLlmDraft((current) => ({ ...current, maxTokens: event.target.value }))} />
             </label>
             <label className="config-field">
               <span>
                 <Clock3 size={16} />
-                Timeout ms
+                Tiempo de espera
               </span>
               <input type="number" value={llmDraft.timeoutMs} onChange={(event) => setLlmDraft((current) => ({ ...current, timeoutMs: event.target.value }))} />
             </label>
@@ -2864,7 +4275,9 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
             Guardar Motor IA
           </button>
         </article>
+        )}
 
+        {activeAdminTab === 'tenants' && (
         <article className="admin-panel tenant-watch-panel">
           <div className="panel-heading-inline">
             <div>
@@ -2921,8 +4334,10 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
             )}
           </div>
         </article>
+        )}
       </div>
 
+      {activeAdminTab === 'billing' && (
       <BillingAdminPanel
         billing={billingAdmin}
         busyAction={billingAction}
@@ -2931,7 +4346,9 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
         selectedTenant={selectedTenant}
         totals={totals}
       />
+      )}
 
+      {activeAdminTab === 'observability' && (
       <article className="admin-panel observability-entry-panel">
         <div className="panel-heading-inline">
           <div>
@@ -2951,6 +4368,7 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onSaveS
           <AdminKpi label="Promedio" value={`${webhookSummary.avgDurationMs ?? 0} ms`} />
         </div>
       </article>
+      )}
     </section>
   );
 }
@@ -2979,6 +4397,9 @@ function BillingAdminPanel({ billing, busyAction, onAction, onSavePlan, selected
   const maxStageTotal = Math.max(1, ...stages.map((stage) => Number(stage.total ?? 0)));
   const selectedTenantId = selectedTenant?.id;
   const selectedTenantBlocked = ['pending_payment', 'past_due', 'expired', 'cancelled', 'suspended', 'payment_required'].includes(selectedTenant?.subscriptionStatus);
+  const selectedNotices = selectedTenant?.billingNotices ?? [];
+  const selectedDiscounts = selectedTenant?.activeDiscountsDetail ?? [];
+  const selectedExceptions = selectedTenant?.activeAccessExceptionsDetail ?? [];
   const [selectedPlanId, setSelectedPlanId] = useState(defaultPlan?.id ?? '');
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [planDraft, setPlanDraft] = useState(() => billingPlanDraft(defaultPlan));
@@ -3176,6 +4597,16 @@ function BillingAdminPanel({ billing, busyAction, onAction, onSavePlan, selected
             <span className={`billing-state is-${selectedTenant?.subscriptionStatus ?? 'missing'}`}>{humanState(selectedTenant?.subscriptionStatus)}</span>
             <p>{selectedTenantBlocked ? 'Requiere atención para recuperar acceso o cobro.' : 'Acceso comercial estable.'}</p>
           </div>
+          {selectedNotices.length > 0 && (
+            <div className="billing-admin-notices">
+              {selectedNotices.slice(0, 3).map((notice) => (
+                <span className={`billing-admin-notice is-${notice.tone}`} key={notice.key}>
+                  <AlertTriangle size={14} />
+                  <b>{notice.title}</b>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="billing-admin-actions">
             <button className="ghost-btn" type="button" onClick={() => onAction('sync', selectedTenantId)} disabled={!selectedTenantId || busyAction === `sync:${selectedTenantId}`}>
               <RotateCcw size={15} />
@@ -3190,6 +4621,28 @@ function BillingAdminPanel({ billing, busyAction, onAction, onSavePlan, selected
               Descuento piloto
             </button>
           </div>
+          {(selectedDiscounts.length > 0 || selectedExceptions.length > 0) && (
+            <div className="billing-commercial-list">
+              {selectedDiscounts.map((discount) => (
+                <div className="billing-commercial-row" key={discount.id}>
+                  <span>Descuento {discount.discountValue}%</span>
+                  <b>{formatDateShort(discount.endsAt)}</b>
+                  <button className="ghost-btn compact" type="button" onClick={() => onAction('revokeDiscount', selectedTenantId, discount.id)} disabled={busyAction === `revokeDiscount:${selectedTenantId}:${discount.id}`}>
+                    Revocar
+                  </button>
+                </div>
+              ))}
+              {selectedExceptions.map((exception) => (
+                <div className="billing-commercial-row" key={exception.id}>
+                  <span>Excepción temporal</span>
+                  <b>{formatDateShort(exception.expiresAt)}</b>
+                  <button className="ghost-btn compact" type="button" onClick={() => onAction('revokeException', selectedTenantId, exception.id)} disabled={busyAction === `revokeException:${selectedTenantId}:${exception.id}`}>
+                    Revocar
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       </div>
     </article>
@@ -3198,6 +4651,7 @@ function BillingAdminPanel({ billing, busyAction, onAction, onSavePlan, selected
 
 function ObservabilityView({ overview }) {
   const tenants = overview?.tenants ?? [];
+  const [activeObservabilityTab, setActiveObservabilityTab] = useState('monitor');
   const [webhookFilters, setWebhookFilters] = useState({ tenantId: '', provider: '', status: '', from: '', to: '', q: '' });
   const [webhookData, setWebhookData] = useState({ summary: overview?.platform?.webhookSummary ?? {}, events: overview?.recentWebhooks ?? [] });
   const [webhookBusy, setWebhookBusy] = useState(false);
@@ -3216,7 +4670,7 @@ function ObservabilityView({ overview }) {
       }
       params.set('limit', '500');
       try {
-        const response = await appFetch(`/api/admin/webhooks?${params}`, { credentials: 'include' });
+        const response = await fetch(`/api/admin/webhooks?${params}`, { credentials: 'include' });
         const payload = await response.json().catch(() => ({}));
         if (!cancelled && response.ok) setWebhookData(payload);
       } finally {
@@ -3247,7 +4701,7 @@ function ObservabilityView({ overview }) {
     setSelectedWebhookId(id);
     setSelectedWebhookBusy(true);
     try {
-      const response = await appFetch(`/api/admin/webhooks/${encodeURIComponent(id)}`, { credentials: 'include' });
+      const response = await fetch(`/api/admin/webhooks/${encodeURIComponent(id)}`, { credentials: 'include' });
       const payload = await response.json().catch(() => null);
       if (response.ok) setSelectedWebhook(payload);
     } finally {
@@ -3256,8 +4710,17 @@ function ObservabilityView({ overview }) {
   }
 
   const webhookSummary = webhookData.summary ?? {};
+  const observabilityTabs = [
+    ['monitor', Activity, 'Monitor', `${webhookSummary.total ?? 0} eventos`],
+    ['events', ListFilter, 'Eventos', `${(webhookData.events ?? []).length} visibles`],
+    ['detail', Eye, 'Detalle', selectedWebhook ? eventStatusLabel(selectedWebhook.status) : 'Sin selección'],
+  ];
+  function inspectWebhook(id) {
+    openWebhookDetail(id);
+    setActiveObservabilityTab('detail');
+  }
   return (
-    <section className="observability-layout">
+    <section className={`observability-layout active-observability-${activeObservabilityTab}`}>
       <article className="admin-panel webhook-console">
         <div className="panel-heading-inline">
           <div>
@@ -3267,7 +4730,23 @@ function ObservabilityView({ overview }) {
           <span className={`admin-chip ${webhookBusy ? 'is-busy' : ''}`}>{webhookBusy ? 'Actualizando' : 'En vivo local'}</span>
         </div>
         <p>Investiga integraciones sin mezclar la operación comercial: filtra por tienda, proveedor, estado, fecha o identificador externo.</p>
-        <div className="webhook-filters">
+        <div className="workspace-tabs observability-tabs" role="tablist" aria-label="Secciones de observabilidad">
+          {observabilityTabs.map(([key, Icon, label, detail]) => (
+            <button
+              aria-selected={activeObservabilityTab === key}
+              className={activeObservabilityTab === key ? 'is-active' : ''}
+              key={key}
+              onClick={() => setActiveObservabilityTab(key)}
+              role="tab"
+              type="button"
+            >
+              <Icon size={16} />
+              <span>{label}</span>
+              <small>{detail}</small>
+            </button>
+          ))}
+        </div>
+        <div className="webhook-filters tab-events">
           <label className="config-field">
             <span>
               <Store size={16} />
@@ -3325,22 +4804,24 @@ function ObservabilityView({ overview }) {
             <input type="datetime-local" value={webhookFilters.to} onChange={(event) => setWebhookFilters((current) => ({ ...current, to: event.target.value }))} />
           </label>
         </div>
-        <AdminWebhookMonitor
-          events={webhookData.events ?? []}
-          granularity={monitorGranularity}
-          onGranularityChange={setMonitorGranularity}
-          summary={webhookSummary}
-        />
-        <div className="webhook-kpis">
-          <AdminKpi label="Procesados" value={webhookSummary.processed ?? 0} />
-          <AdminKpi label="Errores" value={webhookSummary.failed ?? 0} />
-          <AdminKpi label="Rechazados" value={webhookSummary.rejected ?? 0} />
-          <AdminKpi label="Promedio" value={`${webhookSummary.avgDurationMs ?? 0} ms`} />
+        <div className="tab-monitor">
+          <AdminWebhookMonitor
+            events={webhookData.events ?? []}
+            granularity={monitorGranularity}
+            onGranularityChange={setMonitorGranularity}
+            summary={webhookSummary}
+          />
+          <div className="webhook-kpis">
+            <AdminKpi label="Procesados" value={webhookSummary.processed ?? 0} />
+            <AdminKpi label="Errores" value={webhookSummary.failed ?? 0} />
+            <AdminKpi label="Rechazados" value={webhookSummary.rejected ?? 0} />
+            <AdminKpi label="Promedio" value={`${webhookSummary.avgDurationMs ?? 0} ms`} />
+          </div>
         </div>
         <div className="webhook-investigation-grid">
-          <div className="webhook-table">
+          <div className="webhook-table tab-events">
             {(webhookData.events ?? []).map((event) => (
-              <button className={`webhook-row ${selectedWebhookId === event.id ? 'is-selected' : ''}`} key={event.id} onClick={() => openWebhookDetail(event.id)} type="button">
+              <button className={`webhook-row ${selectedWebhookId === event.id ? 'is-selected' : ''}`} key={event.id} onClick={() => inspectWebhook(event.id)} type="button">
                 <time>{formatDateTime(event.receivedAt)}</time>
                 <strong>{providerLabel(event.provider)}</strong>
                 <span>{event.tenantId ?? 'Sin tienda'}</span>
@@ -3359,7 +4840,7 @@ function ObservabilityView({ overview }) {
             )}
           </div>
 
-          <aside className="webhook-detail-panel">
+          <aside className="webhook-detail-panel tab-detail">
             <div className="panel-heading-inline">
               <div>
                 <span className="eyebrow">Detalle técnico</span>
@@ -3664,12 +5145,18 @@ function planLabel(value) {
 }
 
 function sourceLabel(value = '') {
-  if (value.includes('whatsapp')) return 'Canal WhatsApp';
-  if (value.includes('google-sheets')) return 'Google Sheets';
-  if (value.includes('google-drive')) return 'Google Drive';
-  if (value.includes('approval')) return 'Aprobación humana';
-  if (value.includes('human-handoff')) return 'Escalamiento humano';
-  if (value.includes('transactional')) return 'Registro transaccional';
+  const source = String(value ?? '').toLowerCase();
+  if (source.includes('whatsapp')) return 'Canal WhatsApp';
+  if (source.includes('google sheets')) return 'Google Sheets';
+  if (source.includes('google-sheets')) return 'Google Sheets';
+  if (source.includes('google drive')) return 'Google Drive';
+  if (source.includes('google-drive')) return 'Google Drive';
+  if (source.includes('approval') || source.includes('aprobación')) return 'Aprobación humana';
+  if (source.includes('human-handoff') || source.includes('escalamiento')) return 'Escalamiento humano';
+  if (source.includes('transactional') || source.includes('registro')) return 'Registro operativo';
+  if (source.includes('cliente')) return 'Gestión de clientes';
+  if (source.includes('pedido')) return 'Gestión de pedidos';
+  if (source.includes('catálogo')) return 'Catálogo de tienda';
   return value ? 'Conexión operativa' : 'Sin origen';
 }
 
@@ -3713,6 +5200,12 @@ function riskLabel(value) {
 
 function eventTypeLabel(value) {
   const labels = {
+    'agent.started': 'Conversacion iniciada',
+    'agent.completed': 'Conversacion cerrada',
+    'agent.failed': 'Error del agente',
+    'tool.call.started': 'Herramienta en uso',
+    'tool.call.completed': 'Herramienta completada',
+    'decision.requested': 'Decision humana requerida',
     'approval.requested': 'Apoyo humano solicitado',
     'approval.granted': 'Aprobación registrada',
     'fallback.activated': 'Ruta alternativa activada',
@@ -3816,16 +5309,22 @@ function formatFullDateTime(value) {
 }
 
 function Configuration({ onSaveConfig, tenant, tools: toolList }) {
+  const [activeConfigTab, setActiveConfigTab] = useState('store');
   const [llmDraft, setLlmDraft] = useState(() => ({
     phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
     phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
     accessTokenRef: tenant.config?.whatsapp?.accessTokenRef ?? 'WHATSAPP_ACCESS_TOKEN_REF',
     verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
     appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
+    spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
+    catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
     tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
     humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
     customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
+    rootFolderRef: tenant.config?.googleDrive?.rootFolderRef ?? `${tenant.id.toUpperCase()}_GOOGLE_DRIVE_ROOT_FOLDER_ID_REF`,
+    customerProfileFolderRef: tenant.config?.googleDrive?.customerProfileFolderRef ?? `${tenant.id.toUpperCase()}_CUSTOMER_PROFILE_FOLDER_REF`,
+    filePolicyRef: tenant.config?.googleDrive?.filePolicyRef ?? `${tenant.id.toUpperCase()}_DRIVE_FILE_POLICY_REF`,
     missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
   }));
   useEffect(() => {
@@ -3835,29 +5334,62 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
       accessTokenRef: tenant.config?.whatsapp?.accessTokenRef ?? 'WHATSAPP_ACCESS_TOKEN_REF',
       verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
       appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
+      spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
+      catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
       tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
       humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
       customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
       ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
+      rootFolderRef: tenant.config?.googleDrive?.rootFolderRef ?? `${tenant.id.toUpperCase()}_GOOGLE_DRIVE_ROOT_FOLDER_ID_REF`,
+      customerProfileFolderRef: tenant.config?.googleDrive?.customerProfileFolderRef ?? `${tenant.id.toUpperCase()}_CUSTOMER_PROFILE_FOLDER_REF`,
+      filePolicyRef: tenant.config?.googleDrive?.filePolicyRef ?? `${tenant.id.toUpperCase()}_DRIVE_FILE_POLICY_REF`,
       missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
     });
   }, [tenant]);
   const fields = [
     ['Identificador WhatsApp', 'WHATSAPP_PHONE_NUMBER_ID_REF', MessageCircle],
     ['Token de verificación', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', KeyRound],
-    ['Google Sheets', 'SPREADSHEET_ID_REF', Database],
-    ['Google clientes', tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500', UserCheck],
-    ['Google pedidos', tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500', ShoppingBag],
+    ['Plan SaaS', tenant.config?.saas?.planCode ?? tenant.plan ?? 'Pendiente', ShoppingBag],
     ['Origen de secretos', 'Requiere revisión', Lock],
+  ];
+  const googleTools = toolList.filter((tool) => tool.name.startsWith('google_'));
+  const googleReady = googleTools.length > 0 && googleTools.every((tool) => ['sandbox_ready', 'production_ready'].includes(tool.status));
+  const googleStatusHint = googleReady ? 'Listo' : 'Pendiente';
+  const connectedTools = toolList.filter((tool) => ['sandbox_ready', 'production_ready', 'approval_required'].includes(tool.status)).length;
+  const configTabs = [
+    ['store', Store, 'Tienda', 'Datos base'],
+    ['google', Database, 'Google', googleStatusHint],
+    ['whatsapp', MessageCircle, 'WhatsApp', llmDraft.phoneNumberId ? 'Conectado' : 'Pendiente'],
+    ['agent', Bot, 'Agente', 'Criterio comercial'],
+    ['tools', PlugZap, 'Conexiones', `${connectedTools}/${toolList.length}`],
   ];
   return (
     <section className="config-layout">
-      <div className="section-title">
-        <span className="eyebrow">Configuración sin código</span>
-        <h2>{tenant.name}</h2>
+      <div className="section-title split-title config-titlebar">
+        <div>
+          <span className="eyebrow">Configuración sin código</span>
+          <h2>{tenant.name}</h2>
+        </div>
+        <div className="config-tabs" role="tablist" aria-label="Secciones de configuración">
+          {configTabs.map(([key, Icon, label, detail]) => (
+            <button
+              aria-selected={activeConfigTab === key}
+              className={activeConfigTab === key ? 'is-active' : ''}
+              key={key}
+              onClick={() => setActiveConfigTab(key)}
+              role="tab"
+              type="button"
+            >
+              <Icon size={16} />
+              <span>{label}</span>
+              <small>{detail}</small>
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="config-grid">
-        <article className="settings-panel">
+      <div className={`config-tab-panel active-config-${activeConfigTab}`}>
+        {activeConfigTab === 'store' && (
+        <article className="settings-panel config-focus-panel">
           <h3>Parámetros de la tienda</h3>
           {fields.map(([label, value, Icon]) => (
             <label className="config-field" key={label}>
@@ -3873,7 +5405,118 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             <span>Los secretos se guardan como referencias por cliente; la app no muestra valores planos.</span>
           </div>
         </article>
-        <article className="settings-panel">
+        )}
+        {activeConfigTab === 'google' && (
+        <article className="settings-panel config-focus-panel">
+          <div className="config-panel-heading">
+            <div>
+              <span className="eyebrow">Google del cliente</span>
+              <h3>Drive y Sheets operativos</h3>
+            </div>
+            <StatusPill status={googleReady ? 'sandbox_ready' : 'needs_binding'} />
+          </div>
+          <div className="google-config-status">
+            <div>
+              <Database size={18} />
+              <span>Sheets</span>
+              <strong>{llmDraft.spreadsheetIdRef || 'Pendiente'}</strong>
+            </div>
+            <div>
+              <FileImage size={18} />
+              <span>Drive</span>
+              <strong>{llmDraft.rootFolderRef || 'Pendiente'}</strong>
+            </div>
+            <div>
+              <ShieldCheck size={18} />
+              <span>Estado</span>
+              <strong>{googleStatusHint}</strong>
+            </div>
+          </div>
+          <div className="config-field-grid">
+            <label className="config-field">
+              <span>
+                <Database size={16} />
+                Referencia segura de Google Sheets
+              </span>
+              <input value={llmDraft.spreadsheetIdRef} onChange={(event) => setLlmDraft((current) => ({ ...current, spreadsheetIdRef: event.target.value }))} />
+            </label>
+            <label className="config-field">
+              <span>
+                <Store size={16} />
+                Rango de catálogo
+              </span>
+              <input value={llmDraft.catalogRange} onChange={(event) => setLlmDraft((current) => ({ ...current, catalogRange: event.target.value }))} />
+            </label>
+            <label className="config-field">
+              <span>
+                <UserCheck size={16} />
+                Rango de clientes
+              </span>
+              <input value={llmDraft.customerProfilesRange} onChange={(event) => setLlmDraft((current) => ({ ...current, customerProfilesRange: event.target.value }))} />
+            </label>
+            <label className="config-field">
+              <span>
+                <ShoppingBag size={16} />
+                Rango de pedidos
+              </span>
+              <input value={llmDraft.ordersRange} onChange={(event) => setLlmDraft((current) => ({ ...current, ordersRange: event.target.value }))} />
+            </label>
+          </div>
+          <details className="advanced-config">
+            <summary>Referencias avanzadas de Drive</summary>
+            <div className="config-field-grid">
+              <label className="config-field">
+                <span>
+                  <FileImage size={16} />
+                  Carpeta raíz
+                </span>
+                <input value={llmDraft.rootFolderRef} onChange={(event) => setLlmDraft((current) => ({ ...current, rootFolderRef: event.target.value }))} />
+              </label>
+              <label className="config-field">
+                <span>
+                  <UserCheck size={16} />
+                  Carpeta de clientes
+                </span>
+                <input value={llmDraft.customerProfileFolderRef} onChange={(event) => setLlmDraft((current) => ({ ...current, customerProfileFolderRef: event.target.value }))} />
+              </label>
+              <label className="config-field">
+                <span>
+                  <Lock size={16} />
+                  Política de archivos
+                </span>
+                <input value={llmDraft.filePolicyRef} onChange={(event) => setLlmDraft((current) => ({ ...current, filePolicyRef: event.target.value }))} />
+              </label>
+            </div>
+          </details>
+          <button
+            className="approve-btn"
+            type="button"
+            onClick={() => onSaveConfig({
+              googleSheets: {
+                spreadsheetIdRef: llmDraft.spreadsheetIdRef.trim(),
+                range: llmDraft.catalogRange.trim(),
+                catalogRange: llmDraft.catalogRange.trim(),
+                customerProfilesRange: llmDraft.customerProfilesRange.trim(),
+                ordersRange: llmDraft.ordersRange.trim(),
+              },
+              googleDrive: {
+                rootFolderRef: llmDraft.rootFolderRef.trim(),
+                customerProfileFolderRef: llmDraft.customerProfileFolderRef.trim(),
+                filePolicyRef: llmDraft.filePolicyRef.trim(),
+              },
+            })}
+          >
+            <Check size={16} />
+            Guardar Google
+          </button>
+          <div className="isolation-note">
+            <ShieldCheck size={18} />
+            <span>OAuth y aprovisionamiento se hacen en Onboarding; aquí se ajustan las referencias y rangos que usa el agente.</span>
+          </div>
+        </article>
+        )}
+        {activeConfigTab === 'whatsapp' && (
+        <article className="settings-panel config-focus-panel">
           <h3>WhatsApp por tienda</h3>
           <label className="config-field">
             <span>
@@ -3927,7 +5570,9 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             Guardar WhatsApp
           </button>
         </article>
-        <article className="settings-panel">
+        )}
+        {activeConfigTab === 'agent' && (
+        <article className="settings-panel config-focus-panel">
           <h3>Política del agente por tienda</h3>
           <label className="config-field">
             <span>
@@ -3960,20 +5605,6 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
               <option value="disabled">No escalar automáticamente</option>
             </select>
           </label>
-          <label className="config-field">
-            <span>
-              <UserCheck size={16} />
-              Hoja clientes
-            </span>
-            <input value={llmDraft.customerProfilesRange} onChange={(event) => setLlmDraft((current) => ({ ...current, customerProfilesRange: event.target.value }))} />
-          </label>
-          <label className="config-field">
-            <span>
-              <ShoppingBag size={16} />
-              Hoja pedidos
-            </span>
-            <input value={llmDraft.ordersRange} onChange={(event) => setLlmDraft((current) => ({ ...current, ordersRange: event.target.value }))} />
-          </label>
           <button
             className="approve-btn"
             type="button"
@@ -3983,10 +5614,6 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
                 missingQuantity: llmDraft.missingQuantity,
                 humanEscalation: Boolean(llmDraft.humanEscalation),
                 responseLanguage: 'es-CO',
-              },
-              googleSheets: {
-                customerProfilesRange: llmDraft.customerProfilesRange,
-                ordersRange: llmDraft.ordersRange,
               },
               orderPolicy: {
                 missingQuantity: llmDraft.missingQuantity,
@@ -4006,7 +5633,9 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             <span>DeepSeek se administra globalmente en Centro de control; aquí solo se define cómo debe operar el agente para esta tienda.</span>
           </div>
         </article>
-        <article className="tools-panel">
+        )}
+        {activeConfigTab === 'tools' && (
+        <article className="tools-panel config-focus-panel">
           <h3>Conexiones operativas</h3>
           <div className="tool-list">
             {toolList.map((tool) => (
@@ -4025,6 +5654,7 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             ))}
           </div>
         </article>
+        )}
       </div>
     </section>
   );
@@ -4075,4 +5705,3 @@ function Traceability({ events, conversations, compact = false }) {
 }
 
 export default App;
-

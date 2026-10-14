@@ -145,7 +145,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: true,
     requiredSecrets: ['WHATSAPP_ACCESS_TOKEN_REF', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', 'WHATSAPP_APP_SECRET_REF'],
-    source: 'ACP/tools/external/tool-whatsapp-business-messaging.yaml',
+    source: 'Canal WhatsApp oficial',
   },
   {
     key: 'google-sheets-read-table',
@@ -155,7 +155,7 @@ export const tools = [
     risk: 'low',
     sideEffects: false,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-google-sheets-read-table.yaml',
+    source: 'Catálogo en Google Sheets',
   },
   {
     key: 'google-drive-file-picker',
@@ -165,7 +165,7 @@ export const tools = [
     risk: 'low',
     sideEffects: false,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-google-drive-file-picker.yaml',
+    source: 'Documentos en Google Drive',
   },
   {
     key: 'customer-profile-lookup',
@@ -175,7 +175,7 @@ export const tools = [
     risk: 'low',
     sideEffects: false,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/proposed/google-sheets-customer-profile-lookup.yaml',
+    source: 'Clientes en Google Sheets',
   },
   {
     key: 'customer-profile-upsert',
@@ -185,7 +185,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: true,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/proposed/google-sheets-customer-profile-upsert.yaml',
+    source: 'Actualización de clientes',
   },
   {
     key: 'google-sheets-order-write',
@@ -195,7 +195,7 @@ export const tools = [
     risk: 'high',
     sideEffects: true,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/proposed/google-sheets-order-write.yaml',
+    source: 'Pedidos en Google Sheets',
   },
   {
     key: 'approval-gate',
@@ -205,7 +205,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: false,
     requiredSecrets: [],
-    source: 'ACP/tools/internal/tool-approval-gate.yaml',
+    source: 'Aprobación humana',
   },
   {
     key: 'transactional-write',
@@ -215,7 +215,7 @@ export const tools = [
     risk: 'high',
     sideEffects: true,
     requiredSecrets: ['TARGET_WRITE_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-transactional-write.yaml',
+    source: 'Registro operativo',
   },
   {
     key: 'human-handoff',
@@ -225,7 +225,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: false,
     requiredSecrets: [],
-    source: 'ACP/tools/internal/tool-human-handoff.yaml',
+    source: 'Escalamiento humano',
   },
 ];
 
@@ -339,6 +339,61 @@ export const conversations = [
   },
 ];
 
+export function createConversationLoadFixture(size = 10, tenantId = 'andina') {
+  const total = Number.isFinite(Number(size)) ? Math.max(1, Math.min(Number(size), 1000)) : 10;
+  const base = conversations.filter((conversation) => conversation.tenantId === tenantId);
+  const source = base.length ? base : conversations;
+  const stages = ['catalog', 'approval', 'handoff', 'payment', 'binding', 'off_hours'];
+  const statuses = ['live', 'live', 'live', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
+  const needs = [
+    'Consulta producto y disponibilidad para domicilio.',
+    'Pregunta por presentaciones similares antes de confirmar.',
+    'Solicita cotizacion con varios productos de catalogo.',
+    'Requiere validacion humana por descuento o ambiguedad.',
+    'Necesita confirmar datos de entrega antes de registrar pedido.',
+  ];
+
+  return Array.from({ length: total }, (_, index) => {
+    const seed = source[index % source.length];
+    const status = index < 3
+      ? ['approval_required', 'blocked', 'degraded'][index]
+      : statuses[index % statuses.length];
+    const stage = status === 'approval_required' || status === 'blocked'
+      ? 'approval'
+      : stages[index % stages.length];
+    const path = stage === 'payment'
+      ? ['whatsapp', 'agent', 'catalog', 'quote', 'payment']
+      : stage === 'binding'
+        ? ['whatsapp', 'agent', 'catalog']
+        : stage === 'off_hours'
+          ? ['whatsapp', 'agent', 'observability', 'approval']
+          : stage === 'approval' || stage === 'handoff'
+            ? ['whatsapp', 'agent', 'catalog', 'quote', 'approval']
+            : ['whatsapp', 'agent', 'catalog', 'drive', 'quote', 'payment'];
+    const serial = String(index + 1).padStart(4, '0');
+    return {
+      ...seed,
+      id: `load-${total}-${serial}`,
+      tenantId,
+      customer: `Cliente ${serial}`,
+      stage,
+      zone: path[path.length - 1],
+      status,
+      value: index % 5 === 0 ? 'Pendiente' : `$${(18000 + index * 7300).toLocaleString('es-CO')}`,
+      progress: Math.min(96, 20 + ((index * 7) % 76)),
+      need: needs[index % needs.length],
+      nextStep: status === 'approval_required' || status === 'blocked'
+        ? 'Escalar a humano con contexto completo antes de responder.'
+        : 'Continuar flujo del agente con herramienta correspondiente.',
+      humanReason: status === 'approval_required' || status === 'blocked'
+        ? 'Fixture de carga: caso critico para validar priorizacion visual.'
+        : '',
+      avatar: `C${(index % 99) + 1}`,
+      path,
+    };
+  });
+}
+
 export const pendingRequests = [
   {
     id: 'hitl-881',
@@ -359,6 +414,16 @@ export const pendingRequests = [
     type: 'human_handoff',
     context: 'El cliente envió una imagen. La política operativa define que este caso debe escalarse a humano.',
     consequence: 'Al responder, el agente retomará búsqueda de catálogo con el producto identificado.',
+  },
+  {
+    id: 'hitl-884',
+    conversationId: 'wa-1045',
+    tenantId: 'andina',
+    title: 'Confirmar escritura del pedido',
+    urgency: 'Alta',
+    type: 'decision.requested',
+    context: 'El agente identificó confirmación de pago recibida por WhatsApp y requiere aprobación antes de registrar la escritura transaccional del pedido.',
+    consequence: 'Al aprobar, el pedido quedará registrado y subirá a preparación humana para despacho.',
   },
   {
     id: 'hitl-883',
