@@ -4773,6 +4773,29 @@ select:disabled {
     repeating-linear-gradient(90deg, rgba(23, 50, 77, 0.035) 0 1px, transparent 1px 18px);
 }
 
+.tenant-admin-actions {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(23, 50, 77, 0.12);
+}
+
+.tenant-admin-actions p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.tenant-admin-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tenant-admin-message {
+  color: var(--muted);
+}
+
 .tenant-radar-top {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);

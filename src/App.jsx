@@ -349,6 +349,86 @@ function csrfHeaders(auth) {
   return token ? { 'x-csrf-token': token } : {};
 }
 
+function loadFacebookSdk(appId, version) {
+  if (window.FB) return Promise.resolve(window.FB);
+  if (window.__ventasIaFacebookSdkPromise) return window.__ventasIaFacebookSdkPromise;
+  window.__ventasIaFacebookSdkPromise = new Promise((resolve, reject) => {
+    const previousInit = window.fbAsyncInit;
+    window.fbAsyncInit = () => {
+      previousInit?.();
+      window.FB.init({ appId, cookie: true, xfbml: false, version });
+      resolve(window.FB);
+    };
+    const script = document.createElement('script');
+    script.async = true;
+    script.defer = true;
+    script.crossOrigin = 'anonymous';
+    script.src = 'https://connect.facebook.net/en_US/sdk.js';
+    script.onerror = () => reject(new Error('No fue posible cargar la conexión segura de Meta.'));
+    document.head.appendChild(script);
+    window.setTimeout(() => reject(new Error('Meta no respondió a tiempo. Intenta de nuevo.')), 15000);
+  });
+  return window.__ventasIaFacebookSdkPromise;
+}
+
+async function launchMetaEmbeddedSignup(launch) {
+  if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
+  const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
+  return new Promise((resolve, reject) => {
+    let loginCode = '';
+    let sessionInfo = null;
+    let settled = false;
+    const finish = () => {
+      if (settled || !loginCode || !sessionInfo?.wabaId || !sessionInfo?.phoneNumberId) return;
+      settled = true;
+      window.removeEventListener('message', onMessage);
+      resolve({ code: loginCode, ...sessionInfo });
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('message', onMessage);
+      reject(error);
+    };
+    const onMessage = (event) => {
+      if (!event.origin.includes('facebook.com') && !event.origin.includes('meta.com')) return;
+      let data = event.data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch { return; }
+      }
+      if (data?.type !== 'WA_EMBEDDED_SIGNUP') return;
+      const payload = data.data ?? data;
+      const eventName = String(payload.event ?? '').toUpperCase();
+      if (eventName === 'CANCEL' || eventName === 'ERROR') {
+        fail(new Error('La autorización de WhatsApp fue cancelada o reportó un error.'));
+        return;
+      }
+      sessionInfo = {
+        wabaId: payload.waba_id ?? payload.wabaId,
+        phoneNumberId: payload.phone_number_id ?? payload.phoneNumberId,
+        displayPhoneNumber: payload.display_phone_number ?? payload.displayPhoneNumber,
+      };
+      finish();
+    };
+    window.addEventListener('message', onMessage);
+    FB.login((response) => {
+      const code = response?.authResponse?.code;
+      if (!code) {
+        fail(new Error('Meta no devolvió el código de autorización.'));
+        return;
+      }
+      loginCode = code;
+      finish();
+    }, {
+      config_id: launch.configId,
+      response_type: launch.responseType ?? 'code',
+      override_default_response_type: true,
+      extras: { sessionInfoVersion: '3' },
+    });
+    window.setTimeout(() => fail(new Error('La autorización de WhatsApp tardó demasiado.')), 180000);
+  });
+}
+
 function firstActiveTenantId(auth) {
   return auth?.memberships?.find((item) => item.status === 'active')?.tenantId ?? auth?.memberships?.[0]?.tenantId ?? '';
 }
@@ -626,6 +706,10 @@ function App() {
 
   async function runOnboardingAction(action) {
     setOnboardingError('');
+    if (action === 'activate' && !isPlatformAdmin) {
+      setOnboardingError('La activacion final requiere una revision del administrador de plataforma.');
+      return;
+    }
     if (action === 'config-whatsapp') {
       setActiveView('config');
       return;
@@ -641,7 +725,7 @@ function App() {
       'billing-cancel': '/api/billing/cancel',
       provision: `/api/saas/tenants/${encodeURIComponent(tenantId)}/google/provision`,
       validate: `/api/saas/tenants/${encodeURIComponent(tenantId)}/validate`,
-      activate: `/api/saas/tenants/${encodeURIComponent(tenantId)}/activate`,
+      activate: `/api/admin/tenants/${encodeURIComponent(tenantId)}/activate`,
     };
     setOnboardingBusy(action);
     try {
@@ -681,6 +765,7 @@ function App() {
     const routes = {
       intent: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/intent`,
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
+      complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
     };
     setOnboardingBusy(`whatsapp-${action}`);
@@ -696,6 +781,17 @@ function App() {
       if (!response.ok) throw new Error(result.error ?? `WhatsApp ${response.status}`);
       if (action === 'start' && result.launch?.authorizationUrl) {
         window.open(result.launch.authorizationUrl, '_blank', 'noopener,noreferrer');
+      }
+      if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
+        const signup = await launchMetaEmbeddedSignup(result.launch);
+        const completionResponse = await fetch(routes.complete, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+          credentials: 'include',
+          body: JSON.stringify(signup),
+        });
+        const completion = await completionResponse.json().catch(() => ({}));
+        if (!completionResponse.ok) throw new Error(completion.error ?? `WhatsApp ${completionResponse.status}`);
       }
       setRefreshKey((value) => value + 1);
       const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
@@ -838,6 +934,15 @@ function App() {
         authStatus={authStatus}
         onGoogleCredential={handleGoogleCredential}
         onSandboxLogin={handleSandboxLogin}
+      />
+    );
+  }
+
+  if (auth?.user && !isPlatformAdmin && !sessionTenantId) {
+    return (
+      <TenantCreationView
+        auth={auth}
+        onCreated={(session) => applySession(session)}
       />
     );
   }
@@ -1028,6 +1133,7 @@ function App() {
             billingStatus={billingStatus}
             busyAction={onboardingBusy}
             error={onboardingError}
+            isPlatformAdmin={isPlatformAdmin}
             onAction={runOnboardingAction}
             onWhatsAppAction={runWhatsAppOnboarding}
             onNavigate={setActiveView}
@@ -1058,7 +1164,7 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} />
         )}
 
-        {activeView === 'config' && <Configuration onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration onNavigate={setActiveView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
     </main>
   );
@@ -1181,6 +1287,62 @@ function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin })
             {authError}
           </div>
         )}
+      </section>
+    </main>
+  );
+}
+
+function TenantCreationView({ auth, onCreated }) {
+  const [draft, setDraft] = useState({ storeName: '', whatsappNumber: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!draft.storeName.trim() || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch('/api/saas/tenants', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+        body: JSON.stringify({ storeName: draft.storeName.trim(), whatsappNumber: draft.whatsappNumber.trim() }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? 'No fue posible crear la tienda');
+      const sessionResponse = await fetch('/api/auth/me', { credentials: 'include' });
+      const session = sessionResponse.ok ? await sessionResponse.json() : null;
+      onCreated(session ?? { ...auth, memberships: [{ tenantId: payload.tenant.id, role: 'owner', status: 'active' }] });
+    } catch (submitError) {
+      setError(submitError.message ?? 'No fue posible crear la tienda');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-panel tenant-create-panel">
+        <div className="brand-mark auth-mark"><Store size={26} /></div>
+        <span className="eyebrow">Primer paso</span>
+        <h1>Configura tu tienda</h1>
+        <p>Tu cuenta de Google ya está identificada. Crea la tienda y después podrás conectar su Drive, Sheets y WhatsApp desde Onboarding.</p>
+        <form onSubmit={submit}>
+          <label className="config-field">
+            <span><Store size={16} /> Nombre de la tienda</span>
+            <input autoFocus value={draft.storeName} onChange={(event) => setDraft((current) => ({ ...current, storeName: event.target.value }))} placeholder="Ej. Tienda La 26" />
+          </label>
+          <label className="config-field">
+            <span><MessageCircle size={16} /> WhatsApp de la tienda <small>(opcional)</small></span>
+            <input value={draft.whatsappNumber} onChange={(event) => setDraft((current) => ({ ...current, whatsappNumber: event.target.value }))} placeholder="Ej. +57 300 000 0000" />
+          </label>
+          <button className="approve-btn" type="submit" disabled={!draft.storeName.trim() || busy}>
+            <Check size={16} />
+            {busy ? 'Creando tienda...' : 'Crear tienda y comenzar'}
+          </button>
+        </form>
+        {error && <div className="auth-error"><AlertTriangle size={17} />{error}</div>}
       </section>
     </main>
   );
@@ -2879,12 +3041,12 @@ function onboardingTabForStep(step) {
   return 'route';
 }
 
-function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, onNavigate, onWhatsAppAction, tenant }) {
+function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAdmin, onAction, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
   const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
-  const next = nextOnboardingAction(status);
+  const next = nextOnboardingAction(status, isPlatformAdmin);
   const completeCount = checks.filter((item) => item.ok).length;
   const progress = Math.round((completeCount / Math.max(checks.length, 1)) * 100);
   const workspace = bundle?.googleWorkspace;
@@ -3077,7 +3239,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, onAction, on
                 {next.secondary.label}
               </button>
             )}
-            {status.readyForActivation && !status.readyForOperation && (
+            {status.readyForActivation && !status.readyForOperation && isPlatformAdmin && (
               <button className="approve-btn" type="button" onClick={() => onAction('activate')} disabled={Boolean(busyAction)}>
                 <ShieldCheck size={16} />
                 Activar tienda
@@ -3455,19 +3617,6 @@ function whatsappStepDetail(step) {
 }
 
 function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConfig, tenant }) {
-  const [manualDraft, setManualDraft] = useState(() => ({
-    phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
-    wabaId: tenant.config?.whatsapp?.wabaId ?? '',
-    displayPhoneNumber: tenant.config?.whatsapp?.displayPhoneNumber ?? tenant.whatsappNumber ?? '',
-  }));
-  useEffect(() => {
-    setManualDraft({
-      phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
-      wabaId: tenant.config?.whatsapp?.wabaId ?? '',
-      displayPhoneNumber: tenant.config?.whatsapp?.displayPhoneNumber ?? tenant.whatsappNumber ?? '',
-    });
-  }, [tenant]);
-
   const paths = [
     {
       key: 'cloud_api_existing',
@@ -3569,42 +3718,22 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
         </div>
       </div>
 
-      {!connected && (
-        <div className="manual-binding">
-          <label className="config-field">
-            <span>
-              <MessageCircle size={16} />
-              Identificador del número
-            </span>
-            <input value={manualDraft.phoneNumberId} onChange={(event) => setManualDraft((current) => ({ ...current, phoneNumberId: event.target.value }))} />
-          </label>
-          <label className="config-field">
-            <span>
+      {!connected && !onboarding.canAutomate && (
+        <div className="manual-guide manual-guide-wide">
+          <strong>La conexión manual no activa el canal por sí sola</strong>
+          <p>
+            El administrador debe configurar Meta o validar la conexión después del registro. Así evitamos guardar un número que no pertenezca a esta tienda ni usar credenciales compartidas.
+          </p>
+          <div className="button-row">
+            <a className="ghost-btn" href={onboarding.externalLinks?.businessSuite} target="_blank" rel="noreferrer">
               <Building2 size={16} />
-              Cuenta WhatsApp Business
-            </span>
-            <input value={manualDraft.wabaId} onChange={(event) => setManualDraft((current) => ({ ...current, wabaId: event.target.value }))} />
-          </label>
-          <label className="config-field">
-            <span>
-              <MessageSquareText size={16} />
-              Teléfono visible
-            </span>
-            <input value={manualDraft.displayPhoneNumber} onChange={(event) => setManualDraft((current) => ({ ...current, displayPhoneNumber: event.target.value }))} />
-          </label>
-          <button
-            className="approve-btn"
-            disabled={!manualDraft.phoneNumberId.trim() || busyAction === 'whatsapp-binding'}
-            onClick={() => onAction('binding', {
-              phoneNumberId: manualDraft.phoneNumberId.trim(),
-              wabaId: manualDraft.wabaId.trim(),
-              displayPhoneNumber: manualDraft.displayPhoneNumber.trim(),
-            })}
-            type="button"
-          >
-            <Check size={16} />
-            Guardar conexión
-          </button>
+              Abrir Meta Business
+            </a>
+            <button className="ghost-btn" type="button" onClick={onOpenConfig}>
+              <Settings2 size={16} />
+              Ver requisitos
+            </button>
+          </div>
         </div>
       )}
     </article>
@@ -3732,7 +3861,7 @@ function onboardingStepAction(key) {
   return action[key] ?? { key: 'validate', label: 'Validar', icon: <RotateCcw size={15} /> };
 }
 
-function nextOnboardingAction(status) {
+function nextOnboardingAction(status, isPlatformAdmin = false) {
   if (status.readyForOperation) {
     return {
       action: 'validate',
@@ -3742,6 +3871,14 @@ function nextOnboardingAction(status) {
     };
   }
   if (status.readyForActivation) {
+    if (!isPlatformAdmin) {
+      return {
+        action: null,
+        label: 'Esperando revision',
+        title: 'Configuracion completa, pendiente de activacion',
+        detail: 'El administrador de plataforma revisa los controles y habilita la operacion.',
+      };
+    }
     return {
       action: 'activate',
       label: 'Activar tienda',
@@ -4001,6 +4138,8 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onRefre
   const [selectedTenantId, setSelectedTenantId] = useState('');
   const [billingAdmin, setBillingAdmin] = useState({ plans: [], funnel: null, loading: true, error: '', lastJob: null });
   const [billingAction, setBillingAction] = useState('');
+  const [tenantLifecycleAction, setTenantLifecycleAction] = useState('');
+  const [tenantLifecycleMessage, setTenantLifecycleMessage] = useState('');
 
   useEffect(() => {
     setLlmDraft({
@@ -4156,6 +4295,29 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onRefre
       }));
     } finally {
       setBillingAction('');
+    }
+  }
+
+  async function runTenantLifecycleAction(action) {
+    if (!selectedTenant?.id) return;
+    const actionKey = `${action}:${selectedTenant.id}`;
+    try {
+      setTenantLifecycleAction(actionKey);
+      setTenantLifecycleMessage('');
+      const response = await fetch(`/api/admin/tenants/${selectedTenant.id}/${action}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? `No fue posible ${action === 'validate' ? 'validar' : 'activar'} la tienda`);
+      setTenantLifecycleMessage(action === 'validate' ? 'Configuración validada. Puedes revisar los resultados antes de activar.' : 'Tienda activada por el administrador de plataforma.');
+      onRefresh?.();
+    } catch (actionError) {
+      setTenantLifecycleMessage(actionError.message ?? 'No fue posible completar la acción');
+    } finally {
+      setTenantLifecycleAction('');
     }
   }
 
@@ -4329,6 +4491,23 @@ function PlatformAdminView({ auth, error, overview, onOpenObservability, onRefre
                   <TenantTimelineStep label="Google" state={tenantSignalState(selectedTenant.googleWorkspaceStatus, ['ready', 'provisioned'], ['pending'])} />
                   <TenantTimelineStep label="WhatsApp" state={tenantSignalState(selectedTenant.whatsappStatus, ['connected'], ['missing'])} />
                   <TenantTimelineStep label="Operación" state={selectedTenant.lastError ? 'bad' : 'ok'} />
+                </div>
+                <div className="tenant-admin-actions">
+                  <div>
+                    <span className="eyebrow">Administración de ciclo de vida</span>
+                    <p>El cliente prepara sus conexiones. La plataforma valida y habilita la operación.</p>
+                  </div>
+                  <div className="tenant-admin-action-buttons">
+                    <button className="ghost-btn compact" type="button" onClick={() => runTenantLifecycleAction('validate')} disabled={Boolean(tenantLifecycleAction)}>
+                      <ShieldCheck size={15} />
+                      {tenantLifecycleAction === `validate:${selectedTenant.id}` ? 'Validando...' : 'Validar configuración'}
+                    </button>
+                    <button className="approve-btn compact" type="button" onClick={() => runTenantLifecycleAction('activate')} disabled={Boolean(tenantLifecycleAction)}>
+                      <Check size={15} />
+                      {tenantLifecycleAction === `activate:${selectedTenant.id}` ? 'Activando...' : 'Activar tienda'}
+                    </button>
+                  </div>
+                  {tenantLifecycleMessage && <small className="tenant-admin-message">{tenantLifecycleMessage}</small>}
                 </div>
               </aside>
             )}
@@ -5438,28 +5617,28 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
                 <Database size={16} />
                 Referencia segura de Google Sheets
               </span>
-              <input value={llmDraft.spreadsheetIdRef} onChange={(event) => setLlmDraft((current) => ({ ...current, spreadsheetIdRef: event.target.value }))} />
+            <input value={llmDraft.spreadsheetIdRef} readOnly />
             </label>
             <label className="config-field">
               <span>
                 <Store size={16} />
                 Rango de catálogo
               </span>
-              <input value={llmDraft.catalogRange} onChange={(event) => setLlmDraft((current) => ({ ...current, catalogRange: event.target.value }))} />
+            <input value={llmDraft.catalogRange} readOnly />
             </label>
             <label className="config-field">
               <span>
                 <UserCheck size={16} />
                 Rango de clientes
               </span>
-              <input value={llmDraft.customerProfilesRange} onChange={(event) => setLlmDraft((current) => ({ ...current, customerProfilesRange: event.target.value }))} />
+            <input value={llmDraft.customerProfilesRange} readOnly />
             </label>
             <label className="config-field">
               <span>
                 <ShoppingBag size={16} />
                 Rango de pedidos
               </span>
-              <input value={llmDraft.ordersRange} onChange={(event) => setLlmDraft((current) => ({ ...current, ordersRange: event.target.value }))} />
+            <input value={llmDraft.ordersRange} readOnly />
             </label>
           </div>
           <details className="advanced-config">
@@ -5470,48 +5649,31 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
                   <FileImage size={16} />
                   Carpeta raíz
                 </span>
-                <input value={llmDraft.rootFolderRef} onChange={(event) => setLlmDraft((current) => ({ ...current, rootFolderRef: event.target.value }))} />
+                <input value={llmDraft.rootFolderRef} readOnly />
               </label>
               <label className="config-field">
                 <span>
                   <UserCheck size={16} />
                   Carpeta de clientes
                 </span>
-                <input value={llmDraft.customerProfileFolderRef} onChange={(event) => setLlmDraft((current) => ({ ...current, customerProfileFolderRef: event.target.value }))} />
+                <input value={llmDraft.customerProfileFolderRef} readOnly />
               </label>
               <label className="config-field">
                 <span>
                   <Lock size={16} />
                   Política de archivos
                 </span>
-                <input value={llmDraft.filePolicyRef} onChange={(event) => setLlmDraft((current) => ({ ...current, filePolicyRef: event.target.value }))} />
+                <input value={llmDraft.filePolicyRef} readOnly />
               </label>
             </div>
           </details>
-          <button
-            className="approve-btn"
-            type="button"
-            onClick={() => onSaveConfig({
-              googleSheets: {
-                spreadsheetIdRef: llmDraft.spreadsheetIdRef.trim(),
-                range: llmDraft.catalogRange.trim(),
-                catalogRange: llmDraft.catalogRange.trim(),
-                customerProfilesRange: llmDraft.customerProfilesRange.trim(),
-                ordersRange: llmDraft.ordersRange.trim(),
-              },
-              googleDrive: {
-                rootFolderRef: llmDraft.rootFolderRef.trim(),
-                customerProfileFolderRef: llmDraft.customerProfileFolderRef.trim(),
-                filePolicyRef: llmDraft.filePolicyRef.trim(),
-              },
-            })}
-          >
-            <Check size={16} />
-            Guardar Google
+          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
+            <ShieldCheck size={16} />
+            Gestionar Google en Onboarding
           </button>
           <div className="isolation-note">
             <ShieldCheck size={18} />
-            <span>OAuth y aprovisionamiento se hacen en Onboarding; aquí se ajustan las referencias y rangos que usa el agente.</span>
+            <span>OAuth, aprovisionamiento y reconexion se gestionan en Onboarding. Las referencias tecnicas quedan protegidas.</span>
           </div>
         </article>
         )}
@@ -5523,114 +5685,62 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
               <MessageCircle size={16} />
               Identificador del número
             </span>
-            <input value={llmDraft.phoneNumberId} onChange={(event) => setLlmDraft((current) => ({ ...current, phoneNumberId: event.target.value }))} />
+            <input value={llmDraft.phoneNumberId || 'Pendiente de validacion'} readOnly />
           </label>
           <label className="config-field">
             <span>
               <KeyRound size={16} />
               Referencia del identificador
             </span>
-            <input value={llmDraft.phoneNumberIdRef} onChange={(event) => setLlmDraft((current) => ({ ...current, phoneNumberIdRef: event.target.value }))} />
+            <input value={llmDraft.phoneNumberIdRef} readOnly />
           </label>
           <label className="config-field">
             <span>
               <Lock size={16} />
               Referencia segura de acceso
             </span>
-            <input value={llmDraft.accessTokenRef} onChange={(event) => setLlmDraft((current) => ({ ...current, accessTokenRef: event.target.value }))} />
+            <input value={llmDraft.accessTokenRef} readOnly />
           </label>
           <label className="config-field">
             <span>
               <ShieldCheck size={16} />
               Referencia de verificación
             </span>
-            <input value={llmDraft.verifyTokenRef} onChange={(event) => setLlmDraft((current) => ({ ...current, verifyTokenRef: event.target.value }))} />
+            <input value={llmDraft.verifyTokenRef} readOnly />
           </label>
           <label className="config-field">
             <span>
               <KeyRound size={16} />
               Referencia segura de aplicación
             </span>
-            <input value={llmDraft.appSecretRef} onChange={(event) => setLlmDraft((current) => ({ ...current, appSecretRef: event.target.value }))} />
+            <input value={llmDraft.appSecretRef} readOnly />
           </label>
-          <button
-            className="approve-btn"
-            type="button"
-            onClick={() => onSaveConfig({
-              whatsapp: {
-                phoneNumberId: llmDraft.phoneNumberId.trim(),
-                phoneNumberIdRef: llmDraft.phoneNumberIdRef.trim(),
-                accessTokenRef: llmDraft.accessTokenRef.trim(),
-                verifyTokenRef: llmDraft.verifyTokenRef.trim(),
-                appSecretRef: llmDraft.appSecretRef.trim(),
-              },
-            })}
-          >
-            <Check size={16} />
-            Guardar WhatsApp
+          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
+            <MessageCircle size={16} />
+            Gestionar WhatsApp en Onboarding
           </button>
+          <div className="isolation-note">
+            <ShieldCheck size={18} />
+            <span>El cliente autoriza su cuenta en Meta desde Onboarding. Los tokens y la validacion del numero no se editan desde esta pantalla.</span>
+          </div>
         </article>
         )}
         {activeConfigTab === 'agent' && (
         <article className="settings-panel config-focus-panel">
-          <h3>Política del agente por tienda</h3>
-          <label className="config-field">
-            <span>
-              <Bot size={16} />
-              Tono comercial
-            </span>
-            <select value={llmDraft.tone} onChange={(event) => setLlmDraft((current) => ({ ...current, tone: event.target.value }))}>
-              <option value="tendero_bogotano">Tendero bogotano</option>
-              <option value="amable_directo">Amable y directo</option>
-              <option value="formal_comercial">Formal comercial</option>
-            </select>
-          </label>
-          <label className="config-field">
-            <span>
-              <MessageCircle size={16} />
-              Cantidad omitida
-            </span>
-            <select value={llmDraft.missingQuantity} onChange={(event) => setLlmDraft((current) => ({ ...current, missingQuantity: event.target.value }))}>
-              <option value="ask">Preguntar siempre</option>
-              <option value="assume_one">Asumir 1 unidad</option>
-            </select>
-          </label>
-          <label className="config-field">
-            <span>
-              <UserCheck size={16} />
-              Escalamiento humano
-            </span>
-            <select value={llmDraft.humanEscalation ? 'enabled' : 'disabled'} onChange={(event) => setLlmDraft((current) => ({ ...current, humanEscalation: event.target.value === 'enabled' }))}>
-              <option value="enabled">Escalar cuando falte información crítica</option>
-              <option value="disabled">No escalar automáticamente</option>
-            </select>
-          </label>
-          <button
-            className="approve-btn"
-            type="button"
-            onClick={() => onSaveConfig({
-              agentPolicy: {
-                tone: llmDraft.tone,
-                missingQuantity: llmDraft.missingQuantity,
-                humanEscalation: Boolean(llmDraft.humanEscalation),
-                responseLanguage: 'es-CO',
-              },
-              orderPolicy: {
-                missingQuantity: llmDraft.missingQuantity,
-                customerIdentifier: 'whatsapp_wa_id',
-                customerRequiredFields: ['name', 'defaultAddress'],
-                customerProfileStore: 'google_sheets',
-                confirmedOrderStore: 'google_sheets',
-                confirmedOrderHandoff: 'preparation_and_delivery',
-              },
-            })}
-          >
-            <Check size={16} />
-            Guardar política del agente
-          </button>
+          <h3>Politica del agente</h3>
           <div className="isolation-note">
             <Bot size={18} />
-            <span>DeepSeek se administra globalmente en Centro de control; aquí solo se define cómo debe operar el agente para esta tienda.</span>
+            <span>Esta politica la administra la plataforma. El cliente no puede cambiar el criterio comercial, el escalamiento humano ni las reglas de pedido.</span>
+          </div>
+          <div className="resource-list compact-resource-list">
+            <ResourceRow icon={Bot} label="Motor IA" value="DeepSeek global de plataforma" />
+            <ResourceRow icon={MessageCircle} label="Idioma" value="Español de Colombia" />
+            <ResourceRow icon={UserCheck} label="Escalamiento" value="Activo por defecto" />
+            <ResourceRow icon={ShoppingBag} label="Cierre" value="Pedido confirmado -> preparacion humana" />
+          </div>
+          <div className="isolation-note">
+            <Bot size={18} />
+            <span>Para solicitar cambios operativos, contacta al administrador de la plataforma.</span>
           </div>
         </article>
         )}
