@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/health",
+      "destination": "https://ventas-ia-backend-free.onrender.com/health"
+    },
+    {
       "source": "/api/:path*",
       "destination": "https://ventas-ia-backend-free.onrender.com/api/:path*"
     },
