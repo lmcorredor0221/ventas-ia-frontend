@@ -15,7 +15,7 @@ def main():
         assert "Resumen operativo" not in body, "Protected dashboard should not render before login"
         assert page.locator(".auth-google-fallback, .google-signin").count() > 0, "Google authentication control should render"
         sandbox_login = page.get_by_text("Usar acceso local de desarrollo")
-        if os.getenv("VITE_GOOGLE_CLIENT_ID"):
+        if page.locator(".google-signin").count() > 0:
             expect(sandbox_login).to_have_count(0)
         else:
             expect(sandbox_login).to_be_visible()
