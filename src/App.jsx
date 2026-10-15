@@ -2,19 +2,23 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   BadgeCheck,
   BarChart3,
   Bell,
   Bot,
   Building2,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   CircleDollarSign,
   Clock3,
+  Calculator,
   Database,
   Eye,
   FileImage,
+  FileUp,
   Gauge,
   KeyRound,
   Layers3,
@@ -36,6 +40,7 @@ import {
   Settings2,
   ShieldCheck,
   ShoppingBag,
+  Sparkles,
   Store,
   UserCheck,
   Users,
@@ -65,6 +70,8 @@ const statusLabel = {
   fallback_available: 'Fallback',
   approval_required: 'Aprobación',
   resolved: 'Resuelto',
+  manual_active: 'Atención manual activa',
+  closed_no_confirmation: 'Cerrado sin confirmar',
 };
 
 const statusIcon = {
@@ -72,6 +79,8 @@ const statusIcon = {
   approval_required: UserCheck,
   blocked: AlertTriangle,
   degraded: Clock3,
+  manual_active: UserCheck,
+  closed_no_confirmation: Clock3,
   needs_binding: PlugZap,
   sandbox_ready: ShieldCheck,
   resolved: BadgeCheck,
@@ -484,6 +493,8 @@ function App() {
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
   const isPlatformAdmin = canAccessPlatformAdmin(auth);
   const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
+  const landingRoute = typeof window !== 'undefined'
+    && (window.location.pathname === '/landing' || new URLSearchParams(window.location.search).get('landing') === '1');
 
   useEffect(() => {
     let cancelled = false;
@@ -652,6 +663,22 @@ function App() {
     setMobileConversationOpen(true);
   }
 
+  async function markManualWhatsApp(id) {
+    if (backendStatus !== 'connected' || !id) return;
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(id)}/manual-whatsapp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+      });
+      if (!response.ok) return;
+      const updated = await response.json();
+      setConversationList((current) => current.map((item) => item.id === id ? updated : item));
+    } catch {
+      // WhatsApp remains available even if the local trace cannot be saved.
+    }
+  }
+
   useEffect(() => {
     if (activeView !== 'conversations') return undefined;
     function handleConversationKeys(event) {
@@ -755,6 +782,36 @@ function App() {
     } catch (error) {
       setBackendStatus((current) => (current === 'offline' ? current : 'connected'));
       setOnboardingError(error.message);
+    } finally {
+      setOnboardingBusy('');
+    }
+  }
+
+  async function runCatalogImport(action, payload = {}) {
+    setOnboardingError('');
+    const route = action === 'validate'
+      ? `/api/saas/tenants/${encodeURIComponent(tenantId)}/google/catalog/validate`
+      : `/api/saas/tenants/${encodeURIComponent(tenantId)}/google/catalog/import`;
+    setOnboardingBusy(`catalog-${action}`);
+    try {
+      const response = await fetch(route, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+        body: JSON.stringify({ csvText: payload.csvText ?? '', fileName: payload.fileName ?? null }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = result.validation?.errors?.[0]?.message ?? result.error ?? `Catalogo ${response.status}`;
+        throw new Error(detail);
+      }
+      if (result.onboarding) setOnboardingBundle(result.onboarding);
+      setBackendStatus('connected');
+      setRefreshKey((value) => value + 1);
+      return result;
+    } catch (error) {
+      setOnboardingError(error.message);
+      return null;
     } finally {
       setOnboardingBusy('');
     }
@@ -927,6 +984,10 @@ function App() {
     setAuthStatus('guest');
   }
 
+  if (landingRoute) {
+    return <LandingPage />;
+  }
+
   if (authRequired && !auth?.user) {
     return (
       <AuthGate
@@ -1093,6 +1154,7 @@ function App() {
             detailCollapsed={conversationDetailCollapsed}
             events={visibleEvents}
             onSelectConversation={openWhatsAppConversation}
+            onOpenWhatsAppExternally={markManualWhatsApp}
             onOpenApprovals={openApprovals}
             onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
             pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation?.id)}
@@ -1135,6 +1197,7 @@ function App() {
             error={onboardingError}
             isPlatformAdmin={isPlatformAdmin}
             onAction={runOnboardingAction}
+            onCatalogImport={runCatalogImport}
             onWhatsAppAction={runWhatsAppOnboarding}
             onNavigate={setActiveView}
             tenant={tenant}
@@ -1161,7 +1224,7 @@ function App() {
         )}
 
         {activeView === 'analytics' && (
-          <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} />
+          <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
         {activeView === 'config' && <Configuration onNavigate={setActiveView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
@@ -1196,10 +1259,10 @@ function defaultUsageSummary(tenantId) {
   return {
     tenantId,
     period: new Date().toISOString().slice(0, 7),
-    planCode: 'ventas_ia_1000_domicilios',
+    planCode: 'ventas_ia_400_domicilios',
     limits: {
-      includedDeliveries: 1000,
-      includedInteractions: 5000,
+      includedDeliveries: 400,
+      includedInteractions: 2700,
       includedLlmTokens: null,
     },
     metrics: {
@@ -1288,6 +1351,127 @@ function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin })
           </div>
         )}
       </section>
+    </main>
+  );
+}
+
+function LandingPage() {
+  const [deliveries, setDeliveries] = useState(200);
+  const appHref = typeof window !== 'undefined' ? `${window.location.origin}/?app=1` : '/?app=1';
+  const estimatedMessages = Math.round(deliveries * 5);
+  const estimatedMetaCovered = Math.min(deliveries, Math.floor(1000 / 5));
+
+  return (
+    <main className="landing-page">
+      <header className="landing-nav">
+        <a className="landing-brand" href="/landing" aria-label="Ventas IA inicio">
+          <span className="landing-brand-mark"><Store size={20} /></span>
+          <span><b>VENTAS IA</b><strong>Ops Store</strong></span>
+        </a>
+        <nav aria-label="Navegación de landing">
+          <a href="#como-funciona">Cómo funciona</a>
+          <a href="#calculadora">Calculadora</a>
+          <a href="#precio">Precio</a>
+        </nav>
+        <a className="landing-login" href={appHref}>Entrar a mi tienda</a>
+      </header>
+
+      <section className="landing-hero">
+        <div className="landing-hero-content">
+          <span className="landing-kicker"><Sparkles size={15} /> Para tiendas que venden por WhatsApp</span>
+          <h1>Recibe pedidos sin estar pegado al celular.</h1>
+          <p>
+            Ventas IA ordena lo que tu cliente escribe, consulta el catálogo de tu tienda y te avisa
+            cuando necesitas preparar, confirmar o decidir algo.
+          </p>
+          <div className="landing-actions">
+            <a className="landing-primary" href={appHref}>Probar gratis <ArrowRight size={17} /></a>
+            <a className="landing-secondary" href="#como-funciona">Ver cómo funciona</a>
+          </div>
+          <div className="landing-hero-note"><CheckCircle2 size={16} /> 7 días de prueba cuando el administrador la habilite</div>
+        </div>
+        <div className="landing-hero-product" aria-label="Vista de la tienda viva">
+          <div className="landing-product-label"><span className="live-dot" /> Tienda viva</div>
+          <img src="/tienda-viva-preview.png" alt="Vista de la operación de una tienda con conversaciones y pedidos" />
+          <div className="landing-product-caption"><b>La tienda sigue visible</b><span>y el tendero conserva la última palabra.</span></div>
+        </div>
+      </section>
+
+      <section className="landing-proof-strip" aria-label="Resumen de la oferta">
+        <div><strong>400</strong><span>domicilios al mes</span></div>
+        <div><strong>$89.000</strong><span>por mes, en COP</span></div>
+        <div><strong>Google</strong><span>tus datos viven en tu Drive</span></div>
+        <div><strong>Humano</strong><span>decide cuando hace falta</span></div>
+      </section>
+
+      <section className="landing-section landing-story" id="como-funciona">
+        <div className="landing-section-heading">
+          <span className="landing-kicker">Una ayuda práctica para el día a día</span>
+          <h2>Del mensaje desordenado al pedido listo.</h2>
+          <p>No tienes que aprender una herramienta complicada. La tienda recibe el mensaje, organiza la solicitud y te muestra qué sigue.</p>
+        </div>
+        <div className="landing-steps">
+          <article><span>01</span><MessageCircle size={22} /><h3>El cliente escribe</h3><p>“Me regalas tres chocorramos y una gaseosa para domicilio”.</p></article>
+          <article><span>02</span><Bot size={22} /><h3>El asistente entiende</h3><p>Busca nombres parecidos en tu catálogo y pregunta solo lo que falta.</p></article>
+          <article><span>03</span><ShoppingBag size={22} /><h3>Tú preparas y decides</h3><p>Cuando el pedido está confirmado, aparece claro para alistarlo o intervenir.</p></article>
+        </div>
+      </section>
+
+      <section className="landing-section landing-benefits">
+        <div className="landing-benefit-copy">
+          <span className="landing-kicker">Qué mejora en tu negocio</span>
+          <h2>Más orden en las horas en que más se mueve la tienda.</h2>
+          <p>La herramienta ayuda a que cada conversación tenga un siguiente paso, sin inventar existencias ni esconder los casos difíciles.</p>
+          <ul>
+            <li><Check size={17} /> Menos tiempo repitiendo precios, nombres y direcciones.</li>
+            <li><Check size={17} /> Pedidos resumidos para preparar con menos errores.</li>
+            <li><Check size={17} /> Casos dudosos visibles para que decidas tú.</li>
+            <li><Check size={17} /> Catálogo, clientes y pedidos guardados en tu Google.</li>
+          </ul>
+        </div>
+        <div className="landing-trust-panel">
+          <ShieldCheck size={25} />
+          <h3>Automatiza la atención, no el criterio del tendero.</h3>
+          <p>Si no encuentra un producto, no puede confirmar stock o llega una imagen, el caso sube a una persona.</p>
+          <div className="landing-trust-row"><Database size={16} /><span>Google Drive y Sheets por tienda</span></div>
+          <div className="landing-trust-row"><Bot size={16} /><span>DeepSeek administrado por la plataforma</span></div>
+          <div className="landing-trust-row"><MessageCircle size={16} /><span>WhatsApp conectado por cada cliente</span></div>
+        </div>
+      </section>
+
+      <section className="landing-section calculator-section" id="calculadora">
+        <div className="landing-section-heading">
+          <span className="landing-kicker"><Calculator size={15} /> Calculadora orientativa</span>
+          <h2>Estima tu volumen antes de empezar.</h2>
+          <p>Usamos una referencia de conversaciones reales. El resultado es una orientación, no una promesa de cobro de Meta.</p>
+        </div>
+        <div className="landing-calculator">
+          <label htmlFor="landing-deliveries">¿Cuántos domicilios haces al mes?</label>
+          <div className="landing-calculator-control"><input id="landing-deliveries" type="range" min="100" max="400" step="50" value={deliveries} onChange={(event) => setDeliveries(Number(event.target.value))} /><output>{deliveries}</output></div>
+          <div className="landing-calculator-results">
+            <div><span>Mensajes estimados</span><strong>{estimatedMessages.toLocaleString('es-CO')}</strong><small>entre cliente y tienda</small></div>
+            <div><span>Meta podría cubrir</span><strong>~{estimatedMetaCovered}</strong><small>referencia de mensajes gratuitos</small></div>
+            <div><span>Asistente IA</span><strong>Incluido</strong><small>sin cobro adicional de Ventas IA</small></div>
+          </div>
+          <p className="landing-calculator-note">Meta puede cobrar directamente al negocio según sus reglas y tipo de conversación. DeepSeek es un costo interno de la plataforma y no se cobra aparte en este plan.</p>
+        </div>
+      </section>
+
+      <section className="landing-section landing-pricing" id="precio">
+        <div>
+          <span className="landing-kicker">Plan Básico</span>
+          <h2>Todo lo esencial para comenzar.</h2>
+          <p>Un plan simple para una tienda que ya recibe pedidos por WhatsApp y quiere responder con más orden.</p>
+        </div>
+        <div className="landing-price-block"><strong>$89.000</strong><span>COP / mes</span><b>Hasta 400 domicilios</b><a className="landing-primary" href={appHref}>Probar gratis <ArrowRight size={17} /></a></div>
+      </section>
+
+      <section className="landing-final-cta">
+        <div><span className="landing-kicker">Empieza con tus propios datos</span><h2>Conecta tu Google, revisa tu catálogo y prueba un pedido.</h2><p>La configuración está guiada paso a paso. La prueba no envía mensajes reales sin tu conexión y autorización.</p></div>
+        <a className="landing-primary" href={appHref}>Comenzar <ArrowRight size={17} /></a>
+      </section>
+
+      <footer className="landing-footer"><span>Ventas IA Ops Store</span><span>La plataforma ayuda. El negocio decide.</span><a href={appHref}>Entrar a la consola</a></footer>
     </main>
   );
 }
@@ -2393,21 +2577,11 @@ function UsagePlanCard({ usage, onOpenAnalytics }) {
         percent={deliveriesPct}
       />
       <UsageMeter
-        label="Interacciones"
+        label="Mensajes atendidos"
         used={usage.metrics.agent_interactions}
         limit={usage.limits.includedInteractions}
         percent={interactionsPct}
       />
-      <div className="usage-mini-grid">
-        <div>
-          <span>Motor IA</span>
-          <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)} tokens</strong>
-        </div>
-        <div>
-          <span>Herramientas</span>
-          <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
-        </div>
-      </div>
       {onOpenAnalytics && (
         <button className="ghost-btn compact" type="button" onClick={onOpenAnalytics}>
           <BarChart3 size={16} />
@@ -2439,6 +2613,7 @@ function ConversationsView({
   detailCollapsed,
   events,
   onOpenApprovals,
+  onOpenWhatsAppExternally,
   onSelectConversation,
   onToggleDetail,
   pendingRequest,
@@ -2457,7 +2632,7 @@ function ConversationsView({
   tab,
   setTab,
 }) {
-  const statuses = ['all', 'live', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
+  const statuses = ['all', 'live', 'manual_active', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
   const activeWorkspaceTab = workspaceTab === 'detail' ? 'detail' : 'list';
   function selectConversation(id) {
     onSelectConversation(id);
@@ -2581,6 +2756,7 @@ function ConversationsView({
             onOpenApprovals={() => onOpenApprovals?.(pendingRequest?.id ?? '')}
             onToggleDetail={onToggleDetail}
             pendingRequest={pendingRequest}
+            onOpenWhatsAppExternally={onOpenWhatsAppExternally}
             tab={tab}
             setTab={setTab}
           />
@@ -2606,6 +2782,7 @@ function ConversationPanel({
   onBack,
   onClose,
   onOpenApprovals,
+  onOpenWhatsAppExternally,
   onOpenList,
   onToggleDetail,
   pendingRequest,
@@ -2659,7 +2836,7 @@ function ConversationPanel({
             </button>
           )}
           {waHref && (
-            <a className="ghost-btn compact whatsapp-header-btn" href={waHref} target="_blank" rel="noreferrer">
+            <a className="ghost-btn compact whatsapp-header-btn" href={waHref} target="_blank" rel="noreferrer" onClick={() => onOpenWhatsAppExternally?.(conversation.id)}>
               <Send size={15} />
               Abrir WhatsApp
             </a>
@@ -2696,7 +2873,7 @@ function ConversationPanel({
           <strong>{riskLabel}</strong>
         </div>
         {waHref && (
-          <a className="ghost-btn compact whatsapp-open-btn" href={waHref} target="_blank" rel="noreferrer">
+          <a className="ghost-btn compact whatsapp-open-btn" href={waHref} target="_blank" rel="noreferrer" onClick={() => onOpenWhatsAppExternally?.(conversation.id)}>
             <Send size={15} />
             Abrir WhatsApp
           </a>
@@ -3041,7 +3218,7 @@ function onboardingTabForStep(step) {
   return 'route';
 }
 
-function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAdmin, onAction, onNavigate, onWhatsAppAction, tenant }) {
+function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
   const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
   const checks = status.checks ?? [];
@@ -3398,6 +3575,13 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
               );
             })}
           </div>
+          <CatalogImportPanel
+            busyAction={busyAction}
+            error={error}
+            googleReady={googleProvisioned}
+            onImport={onCatalogImport}
+            spreadsheetUrl={workspace?.spreadsheet?.url}
+          />
         </article>
 
         <article className="guide-panel google-result-panel">
@@ -3430,15 +3614,87 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
   );
 }
 
+function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsheetUrl }) {
+  const inputRef = useRef(null);
+  const [file, setFile] = useState(null);
+  const [csvText, setCsvText] = useState('');
+  const [result, setResult] = useState(null);
+  const [localError, setLocalError] = useState('');
+
+  async function selectFile(event) {
+    const selected = event.target.files?.[0];
+    event.target.value = '';
+    if (!selected) return;
+    setLocalError('');
+    setResult(null);
+    if (selected.size > 2 * 1024 * 1024) {
+      setLocalError('El archivo supera 2 MB. Divide el catalogo en archivos mas pequenos.');
+      return;
+    }
+    const text = await selected.text();
+    setFile(selected);
+    setCsvText(text);
+    const validation = await onImport('validate', { csvText: text, fileName: selected.name });
+    if (validation) setResult(validation);
+  }
+
+  async function importFile() {
+    if (!csvText) return;
+    const imported = await onImport('import', { csvText, fileName: file?.name });
+    if (imported) setResult(imported);
+  }
+
+  const validationErrors = result?.errors ?? [];
+  const validationWarnings = result?.warnings ?? [];
+  return (
+    <article className="catalog-import-card">
+      <div className="catalog-import-heading">
+        <div>
+          <span className="eyebrow">Catalogo inicial</span>
+          <h4>Carga tus productos desde CSV</h4>
+          <p>Preparamos una vista previa antes de cambiar la hoja de tu tienda. Puedes corregir el archivo y volver a intentarlo.</p>
+        </div>
+        <FileUp size={21} />
+      </div>
+      <input accept=".csv,text/csv" className="visually-hidden" onChange={selectFile} ref={inputRef} type="file" />
+      <div className="catalog-import-actions">
+        <button className="ghost-btn" onClick={() => inputRef.current?.click()} type="button">
+          <FileUp size={16} />
+          Elegir CSV
+        </button>
+        {file && <span className="catalog-file-name">{file.name}</span>}
+        {result?.valid && result.canImport && (
+          <button className="approve-btn" disabled={Boolean(busyAction)} onClick={importFile} type="button">
+            <Check size={16} />
+            {busyAction === 'catalog-import' ? 'Importando' : 'Copiar a Google Sheets'}
+          </button>
+        )}
+      </div>
+      {(localError || error) && <p className="catalog-import-error"><AlertTriangle size={15} />{localError || error}</p>}
+      {result && (
+        <div className={`catalog-import-result ${result.valid ? 'is-valid' : 'is-invalid'}`}>
+          <strong>{result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
+          <span>{result.message}</span>
+          {result.valid && <small>{result.activeRows ?? result.totalRows} productos activos · {googleReady ? 'Google preparado' : 'Conecta Google para importarlo'}</small>}
+          {validationErrors.slice(0, 4).map((item) => <small className="is-error" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
+          {validationWarnings.slice(0, 3).map((item) => <small className="is-warning" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
+          {result.status === 'imported' && spreadsheetUrl && (
+            <a className="catalog-sheet-link" href={spreadsheetUrl} rel="noreferrer" target="_blank">Abrir hoja actualizada</a>
+          )}
+        </div>
+      )}
+      <small className="catalog-import-hint">Columnas obligatorias: <b>sku</b> y <b>nombre</b>. También puedes incluir precio, stock, categoría, marca y presentación.</small>
+    </article>
+  );
+}
+
 function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
   const plan = billing?.plan;
   const activeSubscription = billing?.subscription ?? subscription;
   const usage = billing?.usageCycle;
   const payments = billing?.payments ?? [];
   const deliveriesUsed = Number(usage?.deliveriesUsed ?? 0);
-  const interactionsUsed = Number(usage?.interactionsUsed ?? 0);
-  const includedDeliveries = Number(plan?.includedDeliveries ?? activeSubscription?.includedDeliveries ?? 1000);
-  const includedInteractions = Number(plan?.includedInteractions ?? activeSubscription?.includedInteractions ?? 5000);
+  const includedDeliveries = Number(plan?.includedDeliveries ?? activeSubscription?.includedDeliveries ?? 400);
   const canContinue = billing?.actions?.canContinueCheckout;
   const canStart = billing?.actions?.canStartCheckout;
   const status = activeSubscription?.status ?? 'pending_payment';
@@ -3459,7 +3715,6 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
       </div>
       <div className="billing-owner-usage">
         <UsageMiniBar label="Domicilios" value={deliveriesUsed} limit={includedDeliveries} />
-        <UsageMiniBar label="Interacciones" value={interactionsUsed} limit={includedInteractions} />
       </div>
       {notices.length > 0 && (
         <div className="billing-notice-list">
@@ -3904,7 +4159,7 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
   };
 }
 
-function AnalyticsView({ conversations: conversationItems, events, requests: requestItems, tools: toolItems, usage }) {
+function AnalyticsView({ conversations: conversationItems, events, requests: requestItems, tools: toolItems, usage, isPlatformAdmin = false }) {
   const [activeAnalyticsTab, setActiveAnalyticsTab] = useState('usage');
   const stages = ['catalog', 'approval', 'handoff', 'binding', 'payment', 'off_hours'];
   const activeCount = conversationItems.filter((conversation) => conversation.status === 'live').length;
@@ -3985,18 +4240,20 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
           </div>
           <div className="capacity-ring-grid">
             <CapacityRing label="Domicilios" value={usage.metrics.deliveries_confirmed} limit={usage.limits.includedDeliveries} percent={deliveriesPct} />
-            <CapacityRing label="Interacciones" value={usage.metrics.agent_interactions} limit={usage.limits.includedInteractions} percent={interactionsPct} />
+            {isPlatformAdmin && <CapacityRing label="Mensajes procesados" value={usage.metrics.agent_interactions} limit={usage.limits.includedInteractions} percent={interactionsPct} />}
           </div>
-          <div className="usage-mini-grid">
-            <div>
-              <span>Motor IA</span>
-              <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)} tokens</strong>
+          {isPlatformAdmin && (
+            <div className="usage-mini-grid">
+              <div>
+                <span>Tokens IA</span>
+                <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)}</strong>
+              </div>
+              <div>
+                <span>Herramientas</span>
+                <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
+              </div>
             </div>
-            <div>
-              <span>Herramientas</span>
-              <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
-            </div>
-          </div>
+          )}
         </article>
         )}
         {activeAnalyticsTab === 'flow' && (
@@ -4557,8 +4814,8 @@ function billingPlanDraft(plan) {
     name: plan?.name ?? 'Plan crecimiento',
     description: plan?.description ?? 'Plan mensual para comercios con mayor volumen operativo.',
     amount: plan?.amount ?? 129000,
-    includedDeliveries: plan?.includedDeliveries ?? 1500,
-    includedInteractions: plan?.includedInteractions ?? 7500,
+    includedDeliveries: plan?.includedDeliveries ?? 400,
+    includedInteractions: plan?.includedInteractions ?? 2700,
     trialEnabled: Boolean(plan?.trialEnabled ?? false),
     trialDays: Number(plan?.trialDays ?? 0),
     graceDays: Number(plan?.graceDays ?? 5),
@@ -5317,8 +5574,11 @@ function planLabel(value) {
     'Production pilot': 'Piloto productivo',
     'Design binding': 'Conexión en curso',
     'Human review': 'Revisión asistida',
-    'ventas ia 1000 domicilios': 'Plan 1.000 domicilios',
-    ventas_ia_1000_domicilios: 'Plan 1.000 domicilios',
+    'ventas ia 400 domicilios': 'Plan Basico',
+    ventas_ia_400_domicilios: 'Plan Basico',
+    'ventas ia 1000 domicilios': 'Plan Basico',
+    ventas_ia_1000_domicilios: 'Plan Basico',
+    'ventas ia basico': 'Plan Basico',
   };
   return labels[value] ?? value;
 }

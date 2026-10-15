@@ -32,12 +32,19 @@ def main():
 
         page.get_by_role("button", name="Onboarding", exact=True).click()
         expect(page.get_by_text("Puesta en marcha guiada")).to_be_visible()
+        page.get_by_role("tab", name=re.compile("Prueba")).click()
         expect(page.get_by_text("Prueba guiada")).to_be_visible()
+        page.get_by_role("tab", name=re.compile("WhatsApp")).click()
         expect(page.get_by_text("Conexión guiada del canal del cliente")).to_be_visible()
         expect(page.get_by_text("Inspector operativo")).not_to_be_visible()
+        page.get_by_role("tab", name=re.compile("Google")).click()
+        expect(page.get_by_text("Carga tus productos desde CSV")).to_be_visible()
 
         page.get_by_role("button", name="Centro de control", exact=True).click()
-        expect(page.get_by_text("Radar comercial y operativo")).to_be_visible()
+        if page.get_by_text("Radar comercial y operativo").count():
+            expect(page.get_by_text("Radar comercial y operativo")).to_be_visible()
+        else:
+            expect(page.get_by_text("Centro de control de plataforma")).to_be_visible()
         horizontal_overflow = page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
         assert not horizontal_overflow, "Centro de control should not create document-level horizontal overflow"
 
@@ -49,16 +56,19 @@ def main():
             expect(page.get_by_text("Conversaciones supervisables")).to_be_visible()
             expect(page.get_by_text("Aprobación registrada").first).to_be_visible()
         else:
-            expect(page.get_by_text("Sin pendientes humanos")).to_be_visible()
+            expect(page.get_by_text("Sin pendientes para este filtro")).to_be_visible()
 
         page.get_by_role("button", name=re.compile("Configur", re.I)).click()
+        page.get_by_role("tab", name=re.compile("Conexiones")).click()
         expect(page.get_by_text("Conexiones operativas")).to_be_visible()
+        page.get_by_role("tab", name=re.compile("WhatsApp")).click()
         expect(page.get_by_text("Referencia de verificación")).to_be_visible()
 
         page.get_by_role("button", name="Analítica", exact=True).click()
         expect(page.get_by_text("Lectura ejecutiva de la tienda")).to_be_visible()
         expect(page.get_by_text("Salud")).to_be_visible()
         expect(page.get_by_text("Capacidad mensual")).to_be_visible()
+        page.get_by_role("tab", name=re.compile("Flujo")).click()
         expect(page.get_by_text("Flujo comercial")).to_be_visible()
 
         mobile = browser.new_page(viewport={"width": 390, "height": 844})
@@ -68,7 +78,7 @@ def main():
             mobile.get_by_role("button", name="Usar acceso local de desarrollo").click()
             mobile.wait_for_load_state("networkidle")
         expect(mobile.get_by_text("Resumen operativo").first).to_be_visible()
-        mobile.get_by_role("button", name="Tienda viva", exact=True).click()
+        mobile.locator(".nav-item").nth(1).click()
         expect(mobile.locator(".store-map")).to_be_visible()
         mobile.screenshot(path=str(ROOT / "test-results-mobile.png"), full_page=True)
 
