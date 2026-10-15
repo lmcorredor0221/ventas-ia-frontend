@@ -9,9 +9,9 @@ OUT_DIR = Path(os.environ.get("UI_RESULTS_DIR", "test-results-landing"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def check_landing(page, name, width, height):
+def check_landing(page, name, width, height, route):
     page.set_viewport_size({"width": width, "height": height})
-    page.goto(f"{BASE_URL}/landing", wait_until="networkidle")
+    page.goto(f"{BASE_URL}{route}", wait_until="networkidle")
     page.get_by_role("heading", name="Recibe pedidos sin estar pegado al celular.").wait_for()
     assert page.locator("body").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
     assert page.get_by_text("Hasta 400").first.is_visible()
@@ -25,8 +25,9 @@ def check_landing(page, name, width, height):
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(headless=True)
     page = browser.new_page()
-    check_landing(page, "desktop", 1440, 1000)
-    check_landing(page, "mobile", 390, 844)
+    check_landing(page, "desktop", 1440, 1000, "/")
+    check_landing(page, "desktop-alias", 1440, 1000, "/landing")
+    check_landing(page, "mobile", 390, 844, "/")
     browser.close()
 
 print("Landing visual checks passed")

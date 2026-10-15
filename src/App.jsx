@@ -493,8 +493,13 @@ function App() {
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
   const isPlatformAdmin = canAccessPlatformAdmin(auth);
   const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
+  const routeQuery = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const appRoute = routeQuery?.get('app') === '1';
   const landingRoute = typeof window !== 'undefined'
-    && (window.location.pathname === '/landing' || new URLSearchParams(window.location.search).get('landing') === '1');
+    && !appRoute
+    && (window.location.pathname === '/'
+      || window.location.pathname === '/landing'
+      || routeQuery?.get('landing') === '1');
 
   useEffect(() => {
     let cancelled = false;

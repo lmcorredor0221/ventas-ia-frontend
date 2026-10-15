@@ -10,7 +10,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 980})
-        page.goto("http://127.0.0.1:5173")
+        page.goto("http://127.0.0.1:5173/?app=1")
         page.wait_for_load_state("networkidle")
         if page.get_by_role("button", name="Usar acceso local de desarrollo").count():
             page.get_by_role("button", name="Usar acceso local de desarrollo").click()
@@ -72,7 +72,7 @@ def main():
         expect(page.get_by_text("Flujo comercial")).to_be_visible()
 
         mobile = browser.new_page(viewport={"width": 390, "height": 844})
-        mobile.goto("http://127.0.0.1:5173")
+        mobile.goto("http://127.0.0.1:5173/?app=1")
         mobile.wait_for_load_state("networkidle")
         if mobile.get_by_role("button", name="Usar acceso local de desarrollo").count():
             mobile.get_by_role("button", name="Usar acceso local de desarrollo").click()
