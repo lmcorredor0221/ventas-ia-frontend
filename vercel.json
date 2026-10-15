@@ -15,6 +15,10 @@
     {
       "source": "/health",
       "destination": "https://ventas-ia-backend-free.onrender.com/health"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }
