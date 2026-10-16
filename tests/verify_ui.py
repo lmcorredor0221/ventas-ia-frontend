@@ -35,7 +35,15 @@ def main():
         page.get_by_role("tab", name=re.compile("Prueba")).click()
         expect(page.get_by_text("Prueba guiada")).to_be_visible()
         page.get_by_role("tab", name=re.compile("WhatsApp")).click()
-        expect(page.get_by_text("Conexión guiada del canal del cliente")).to_be_visible()
+        expect(page.get_by_text("Conecta el WhatsApp de tu tienda")).to_be_visible()
+        if page.get_by_text("La conexión automática se está activando").count():
+            expect(page.get_by_text("La conexión automática se está activando")).to_be_visible()
+        elif page.get_by_text("Listo para conectar").count():
+            expect(page.get_by_text("Listo para conectar")).to_be_visible()
+        else:
+            expect(page.get_by_text("WhatsApp conectado")).to_be_visible()
+        expect(page.get_by_text("Referencia segura")).not_to_be_visible()
+        expect(page.get_by_role("link", name="Abrir Meta Business")).not_to_be_visible()
         expect(page.get_by_text("Inspector operativo")).not_to_be_visible()
         page.get_by_role("tab", name=re.compile("Google")).click()
         expect(page.get_by_text("Carga tus productos desde CSV")).to_be_visible()

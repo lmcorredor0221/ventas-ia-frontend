@@ -126,6 +126,25 @@ const loadFixtureSize = typeof window !== 'undefined'
   : 0;
 const initialConversations = loadFixtureSize ? createConversationLoadFixture(loadFixtureSize) : conversations;
 
+function currentRouteQuery() {
+  return typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+}
+
+function googleOAuthNotice(query = currentRouteQuery()) {
+  const outcome = query?.get('googleOAuth');
+  if (outcome === 'connected') return 'Google quedó conectado. Ahora crea la estructura de tu tienda en Drive y Sheets.';
+  if (outcome === 'cancelled') return 'La autorización de Google no se completó. Puedes intentarlo de nuevo cuando tengas la cuenta de la tienda a mano.';
+  if (outcome === 'failed') return 'No fue posible terminar la conexión con Google. Inténtalo de nuevo o revisa la cuenta seleccionada.';
+  return '';
+}
+
+function legalDocumentForPath(pathname) {
+  if (pathname === '/privacidad' || pathname === '/privacy') return 'privacy';
+  if (pathname === '/terminos' || pathname === '/terms') return 'terms';
+  if (pathname === '/eliminar-datos' || pathname === '/data-deletion') return 'deletion';
+  return null;
+}
+
 function zoneCenter(zoneId) {
   const zone = storeZones.find((item) => item.id === zoneId) ?? storeZones[0];
   return {
@@ -380,6 +399,18 @@ function loadFacebookSdk(appId, version) {
   return window.__ventasIaFacebookSdkPromise;
 }
 
+function isTrustedMetaOrigin(origin) {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'facebook.com'
+      || host.endsWith('.facebook.com')
+      || host === 'meta.com'
+      || host.endsWith('.meta.com');
+  } catch {
+    return false;
+  }
+}
+
 async function launchMetaEmbeddedSignup(launch) {
   if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
   const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
@@ -400,7 +431,7 @@ async function launchMetaEmbeddedSignup(launch) {
       reject(error);
     };
     const onMessage = (event) => {
-      if (!event.origin.includes('facebook.com') && !event.origin.includes('meta.com')) return;
+      if (!isTrustedMetaOrigin(event.origin)) return;
       let data = event.data;
       if (typeof data === 'string') {
         try { data = JSON.parse(data); } catch { return; }
@@ -447,12 +478,13 @@ function canAccessPlatformAdmin(auth) {
 }
 
 function App() {
+  const initialRouteQuery = currentRouteQuery();
   const [tenantList, setTenantList] = useState(tenants);
   const [toolList, setToolList] = useState(tools);
   const [conversationList, setConversationList] = useState(initialConversations);
   const [backendStatus, setBackendStatus] = useState('connecting');
-  const [tenantId, setTenantId] = useState(tenants[0].id);
-  const [activeView, setActiveView] = useState('summary');
+  const [tenantId, setTenantId] = useState(() => initialRouteQuery?.get('tenant') ?? tenants[0].id);
+  const [activeView, setActiveView] = useState(() => initialRouteQuery?.get('view') === 'onboarding' ? 'onboarding' : 'summary');
   const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? conversations[0].id);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationQuery, setConversationQuery] = useState('');
@@ -476,6 +508,7 @@ function App() {
   const [onboardingBundle, setOnboardingBundle] = useState(null);
   const [onboardingBusy, setOnboardingBusy] = useState('');
   const [onboardingError, setOnboardingError] = useState('');
+  const [onboardingNotice, setOnboardingNotice] = useState(() => googleOAuthNotice(initialRouteQuery));
   const [adminOverview, setAdminOverview] = useState(null);
   const [adminError, setAdminError] = useState('');
   const [billingStatus, setBillingStatus] = useState(null);
@@ -493,8 +526,9 @@ function App() {
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
   const isPlatformAdmin = canAccessPlatformAdmin(auth);
   const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
-  const routeQuery = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const routeQuery = currentRouteQuery();
   const appRoute = routeQuery?.get('app') === '1';
+  const legalDocument = typeof window !== 'undefined' ? legalDocumentForPath(window.location.pathname) : null;
   const landingRoute = typeof window !== 'undefined'
     && !appRoute
     && (window.location.pathname === '/'
@@ -533,6 +567,24 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const query = currentRouteQuery();
+    const outcome = query?.get('googleOAuth');
+    if (!outcome || typeof window === 'undefined') return;
+
+    const callbackTenantId = query.get('tenant');
+    if (callbackTenantId) setTenantId(callbackTenantId);
+    setActiveView('onboarding');
+    setOnboardingNotice(googleOAuthNotice(query));
+    setOnboardingError(outcome === 'connected' ? '' : googleOAuthNotice(query));
+    setRefreshKey((value) => value + 1);
+
+    const nextUrl = new URL(window.location.href);
+    ['view', 'googleOAuth', 'tenant', 'reason'].forEach((key) => nextUrl.searchParams.delete(key));
+    nextUrl.searchParams.set('app', '1');
+    window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
   }, []);
 
   useEffect(() => {
@@ -762,10 +814,8 @@ function App() {
     setOnboardingBusy(action);
     try {
       if (action === 'google-oauth') {
-        const response = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start`, { credentials: 'include' });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error ?? `OAuth ${response.status}`);
-        if (result.authorizationUrl) window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer');
+        window.location.assign(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start?redirect=1`);
+        return;
       } else {
         if (!postRoutes[action]) throw new Error(`Acción no configurada: ${action}`);
         const body = ['billing-checkout', 'billing-continue', 'billing-cancel'].includes(action)
@@ -846,11 +896,15 @@ function App() {
       }
       if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
         const signup = await launchMetaEmbeddedSignup(result.launch);
+        const completionPayload = {
+          ...signup,
+          registrationPin: payload.registrationPin,
+        };
         const completionResponse = await fetch(routes.complete, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
           credentials: 'include',
-          body: JSON.stringify(signup),
+          body: JSON.stringify(completionPayload),
         });
         const completion = await completionResponse.json().catch(() => ({}));
         if (!completionResponse.ok) throw new Error(completion.error ?? `WhatsApp ${completionResponse.status}`);
@@ -987,6 +1041,10 @@ function App() {
     }).catch(() => {});
     setAuth(null);
     setAuthStatus('guest');
+  }
+
+  if (legalDocument) {
+    return <LegalPage document={legalDocument} />;
   }
 
   if (landingRoute) {
@@ -1200,6 +1258,7 @@ function App() {
             billingStatus={billingStatus}
             busyAction={onboardingBusy}
             error={onboardingError}
+            notice={onboardingNotice}
             isPlatformAdmin={isPlatformAdmin}
             onAction={runOnboardingAction}
             onCatalogImport={runCatalogImport}
@@ -1476,8 +1535,81 @@ function LandingPage() {
         <a className="landing-primary" href={appHref}>Comenzar <ArrowRight size={17} /></a>
       </section>
 
-      <footer className="landing-footer"><span>Ventas IA Ops Store</span><span>La plataforma ayuda. El negocio decide.</span><a href={appHref}>Entrar a la consola</a></footer>
+      <footer className="landing-footer">
+        <span>Ventas IA Ops Store</span>
+        <span>La plataforma ayuda. El negocio decide.</span>
+        <span className="landing-footer-links"><a href="/privacidad">Privacidad</a><a href="/terminos">Términos</a><a href="/eliminar-datos">Eliminar datos</a><a href={appHref}>Entrar a la consola</a></span>
+      </footer>
     </main>
+  );
+}
+
+function LegalPage({ document }) {
+  const isPrivacy = document === 'privacy';
+  const isDeletion = document === 'deletion';
+  const title = isPrivacy ? 'Aviso de privacidad' : isDeletion ? 'Instrucciones para eliminar datos' : 'Términos de uso';
+  const description = isPrivacy
+    ? 'Cómo Ventas IA trata la información necesaria para operar una tienda conectada.'
+    : isDeletion
+      ? 'Cómo solicitar la eliminación de datos asociados a una tienda o a una conversación de WhatsApp.'
+      : 'Las reglas básicas para usar Ventas IA en la atención de pedidos por WhatsApp.';
+
+  return (
+    <main className="legal-page">
+      <header className="landing-nav legal-nav">
+        <a className="landing-brand" href="/landing" aria-label="Ventas IA inicio">
+          <span className="landing-brand-mark"><Store size={20} /></span>
+          <span><b>VENTAS IA</b><strong>Ops Store</strong></span>
+        </a>
+        <a className="landing-login" href="/?app=1">Entrar a mi tienda</a>
+      </header>
+      <article className="legal-document">
+        <span className="landing-kicker">Ventas IA Ops Store</span>
+        <h1>{title}</h1>
+        <p className="legal-lead">{description}</p>
+        {isPrivacy ? <PrivacyNotice /> : isDeletion ? <DataDeletionNotice /> : <TermsNotice />}
+        <div className="legal-callout">
+          <ShieldCheck size={20} />
+          <p>Antes de la publicación comercial definitiva, este aviso debe ser revisado y completado con la razón social, canal de soporte y datos de contacto oficiales del operador de la plataforma.</p>
+        </div>
+        <p className="legal-updated">Última actualización: 16 de octubre de 2026.</p>
+      </article>
+    </main>
+  );
+}
+
+function PrivacyNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Información que procesa la plataforma</h2><p>La plataforma procesa los datos que el dueño de la tienda autoriza para atender pedidos: catálogo, existencias, clientes, direcciones, pedidos y conversaciones operativas. También usa el nombre y correo de la cuenta Google que inicia sesión para identificar su acceso a la tienda.</p></section>
+      <section><h2>Información de Google</h2><p>Cuando el dueño conecta Google, Ventas IA solicita permisos para crear y administrar la estructura operativa de esa tienda: una carpeta de Drive y una hoja de cálculo con catálogo, clientes, pedidos y configuración. El acceso se usa para leer el catálogo y los datos que la tienda registra, y para guardar los pedidos que el cliente confirma.</p></section>
+      <section><h2>Información de WhatsApp</h2><p>Cuando la tienda conecta su propio canal de WhatsApp Business, la plataforma procesa los mensajes necesarios para identificar la solicitud, consultar el catálogo, responder, escalar dudas al tendero y registrar la trazabilidad del pedido. Los cargos y condiciones del canal de WhatsApp son responsabilidad de la tienda frente a Meta.</p></section>
+      <section><h2>Uso y protección</h2><p>La información se usa únicamente para prestar el servicio contratado, mantener la operación, prevenir fallos y atender solicitudes de soporte. Los tokens de acceso a Google y a proveedores se almacenan como referencias protegidas, separados por tienda. La plataforma no vende el catálogo ni los datos operativos de una tienda a otras tiendas.</p></section>
+      <section><h2>Control de la tienda</h2><p>El dueño conserva el control sobre su cuenta Google, su catálogo y su WhatsApp. Puede desconectar las integraciones desde la plataforma y solicitar la revisión o eliminación de los datos que estén bajo administración de Ventas IA, según el contrato aplicable.</p></section>
+    </div>
+  );
+}
+
+function DataDeletionNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Solicitudes de clientes de una tienda</h2><p>Si escribiste por WhatsApp a una tienda que usa Ventas IA y quieres que se eliminen tus datos de atención, escríbele a esa misma tienda por su canal oficial. La tienda es quien decide sobre su catálogo, pedidos y relación con sus clientes; confirmará la solicitud con su dueño y la enviará al soporte de la plataforma cuando corresponda.</p></section>
+      <section><h2>Solicitudes de dueños de tienda</h2><p>Ingresa a la consola con la cuenta propietaria. Antes de solicitar eliminación, descarga o conserva los pedidos y registros que necesites por obligaciones comerciales. Puedes desconectar Google y WhatsApp desde Onboarding; la solicitud de eliminación de la información administrada por la plataforma se atiende por el canal de soporte indicado en tu suscripción.</p></section>
+      <section><h2>Qué se elimina</h2><p>La solicitud puede incluir los datos de contacto, conversaciones operativas, configuraciones y secretos de integración almacenados para esa tienda. No se eliminan de inmediato los registros que una tienda deba conservar por razones contables, legales o de seguridad. Google, Meta/WhatsApp y Mercado Pago gestionan sus propios datos y solicitudes bajo sus respectivas políticas.</p></section>
+      <section><h2>Verificación y respuesta</h2><p>Para proteger la información, se valida la identidad de quien solicita la eliminación y su relación con la tienda o la conversación. La plataforma registra el resultado de la solicitud y confirma por el mismo canal de contacto disponible.</p></section>
+    </div>
+  );
+}
+
+function TermsNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Qué ofrece el servicio</h2><p>Ventas IA ayuda a organizar conversaciones de WhatsApp, consultar el catálogo autorizado por la tienda y presentar pedidos claros para su preparación. La plataforma no reemplaza el criterio del tendero ni garantiza existencias, precios, tiempos de entrega o la aceptación de un pedido.</p></section>
+      <section><h2>Responsabilidad de la tienda</h2><p>La tienda debe mantener actualizado su catálogo, existencias, precios, datos de contacto y reglas de atención. También debe contar con los permisos necesarios para usar Google, WhatsApp Business y la información de sus clientes.</p></section>
+      <section><h2>Decisiones humanas</h2><p>Cuando el agente no puede confirmar un producto, detecta ambigüedad, falta información crítica o el pedido necesita preparación, el caso se presenta a una persona. La decisión final sobre confirmar, preparar, cobrar o entregar un pedido pertenece a la tienda.</p></section>
+      <section><h2>Servicios de terceros</h2><p>Google, Meta/WhatsApp, Mercado Pago y el proveedor de inteligencia artificial son servicios independientes. Sus condiciones, disponibilidad y cobros pueden cambiar. Ventas IA informa su uso dentro de la plataforma, pero no controla sus decisiones ni sus interrupciones.</p></section>
+      <section><h2>Acceso y suscripción</h2><p>El acceso se habilita de acuerdo con el estado de la suscripción y el plan contratado. La tienda puede revisar el consumo operativo desde la consola. Los límites, renovaciones, cambios de plan y estados de pago se aplican según las condiciones comerciales vigentes.</p></section>
+    </div>
   );
 }
 
@@ -3223,7 +3355,7 @@ function onboardingTabForStep(step) {
   return 'route';
 }
 
-function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
+function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
   const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
   const checks = status.checks ?? [];
@@ -3383,6 +3515,13 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
         ))}
       </div>
 
+      {notice && (
+        <div className={`setup-notice ${error ? 'is-warning' : ''}`} role="status">
+          {error ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
+          <span>{notice}</span>
+        </div>
+      )}
+
       {activeOnboardingTab === 'billing' && (
         <BillingOwnerPanel
           billing={billingStatus}
@@ -3517,7 +3656,8 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
         busyAction={busyAction}
         onboarding={whatsappOnboarding}
         onAction={onWhatsAppAction}
-        onOpenConfig={() => onNavigate('config')}
+        isPlatformAdmin={isPlatformAdmin}
+        onOpenPlatformControl={() => onNavigate('admin')}
         tenant={tenant}
       />
       )}
@@ -3839,49 +3979,12 @@ function onboardingDetailLabel(check) {
   return check.detail ?? 'Pendiente';
 }
 
-function whatsappPathLabel(value) {
-  const labels = {
-    cloud_api_existing: 'Ya tiene integración oficial',
-    business_app_existing: 'Tiene WhatsApp Business App',
-    new_business: 'Empieza desde cero',
-  };
-  return labels[value] ?? 'Sin seleccionar';
-}
-
-function whatsappStepLabel(step) {
-  const byKey = {
-    diagnosis: 'Diagnóstico',
-    meta_auth: 'Autorización Meta',
-    business: 'Cuenta WhatsApp',
-    phone: 'Número y código',
-    webhook: 'Eventos de conexión',
-    test: 'Mensaje de prueba',
-  };
-  return byKey[step?.key] ?? String(step?.label ?? '').replace('Webhook', 'Eventos de conexión');
-}
-
-function whatsappStepDetail(step) {
-  const details = {
-    diagnosis: 'Preguntar si ya tiene WhatsApp Business, integración oficial o empieza desde cero.',
-    meta_auth: 'Guiar al cliente en Meta Business hasta habilitar la cuenta.',
-    business: 'Seleccionar o crear la cuenta WhatsApp del cliente, negocio, nombre visible y categoría.',
-    phone: 'Validar el número del cliente, recibir el código y obtener el identificador del número.',
-    webhook: 'Conectar los mensajes entrantes de WhatsApp con la URL pública de la plataforma.',
-    test: 'Enviar un mensaje real cuando la URL pública esté publicada.',
-  };
-  return details[step?.key] ?? String(step?.detail ?? '')
-    .replaceAll('phone_number_id', 'identificador del número')
-    .replaceAll('WABA', 'cuenta WhatsApp')
-    .replaceAll('webhook', 'evento de conexión')
-    .replaceAll('Webhook', 'Evento de conexión');
-}
-
-function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConfig, tenant }) {
+function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onOpenPlatformControl, tenant }) {
   const paths = [
     {
       key: 'cloud_api_existing',
       title: 'Ya tiene integración oficial',
-      detail: 'Conectamos la cuenta, el número y la referencia segura del negocio existente.',
+      detail: 'Conectamos la cuenta y el número del negocio que ya usa la integración oficial.',
       hasWhatsAppBusiness: true,
     },
     {
@@ -3897,18 +4000,21 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
       hasWhatsAppBusiness: false,
     },
   ];
+  const [registrationPin, setRegistrationPin] = useState('');
   const currentPath = onboarding.setupPath;
   const connected = onboarding.status === 'connected';
+  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
+  const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
   return (
     <article className="guide-panel whatsapp-wizard">
       <div className="wizard-heading">
         <div>
           <span className="eyebrow">Activación WhatsApp Business</span>
-          <h3>Conexión guiada del canal del cliente</h3>
-          <p>Primero identificamos el punto de partida. Si el alta guiada de Meta está configurada, la microapp abre la conexión; si no, deja una guía operativa paso a paso.</p>
+          <h3>Conecta el WhatsApp de tu tienda</h3>
+          <p>Elige tu punto de partida. Después Meta te pedirá iniciar sesión, confirmar el negocio y verificar el número. Ventas IA completa lo técnico.</p>
         </div>
         <span className={`automation-chip ${onboarding.canAutomate ? 'is-ready' : 'is-manual'}`}>
-          {onboarding.canAutomate ? 'Alta guiada disponible' : 'Guía asistida'}
+          {connected ? 'Canal conectado' : onboarding.canAutomate ? 'Conexión automática' : 'Activación pendiente'}
         </span>
       </div>
 
@@ -3918,12 +4024,15 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
             disabled={busyAction === 'whatsapp-intent' || connected}
             key={path.key}
-            onClick={() => onAction('intent', {
-              setupPath: path.key,
-              hasWhatsAppBusiness: path.hasWhatsAppBusiness,
-              businessName: tenant.name,
-              contactPhone: tenant.whatsappNumber,
-            })}
+            onClick={() => {
+              setRegistrationPin('');
+              onAction('intent', {
+                setupPath: path.key,
+                hasWhatsAppBusiness: path.hasWhatsAppBusiness,
+                businessName: tenant.name,
+                contactPhone: tenant.whatsappNumber,
+              });
+            }}
             type="button"
           >
             <span>{path.title}</span>
@@ -3933,69 +4042,77 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
       </div>
 
       <div className="wizard-content-grid">
-        <div className="whatsapp-step-list">
-          {onboarding.steps.map((step) => (
-            <div className={`whatsapp-step is-${step.status}`} key={step.key}>
-              <span>{step.status === 'done' ? <Check size={14} /> : step.status === 'locked' ? <Lock size={14} /> : <MessageCircle size={14} />}</span>
-              <div>
-                <strong>{whatsappStepLabel(step)}</strong>
-                <p>{whatsappStepDetail(step)}</p>
-              </div>
-            </div>
-          ))}
+        <div className="whatsapp-flow-summary">
+          <div>
+            <span>1</span>
+            <div><strong>Indícanos cómo usas WhatsApp hoy</strong><p>Escoge la opción que más se parezca a tu tienda.</p></div>
+          </div>
+          <div>
+            <span>2</span>
+            <div><strong>Confirma el negocio y el número en Meta</strong><p>Meta protege tu cuenta y puede pedirte un código por SMS o llamada.</p></div>
+          </div>
+          <div>
+            <span>3</span>
+            <div><strong>Queda listo para recibir pedidos</strong><p>Ventas IA valida el número, conecta los mensajes y hace una prueba.</p></div>
+          </div>
         </div>
         <div className="whatsapp-sidecar">
-          <div className="manual-guide">
-            <strong>{connected ? 'Canal conectado' : onboarding.canAutomate ? 'Listo para alta guiada Meta' : 'Pendiente configuración Meta'}</strong>
-            <p>
-              {connected
-                ? `El identificador ${onboarding.binding.phoneNumberId} ya está asociado a esta tienda.`
-                : onboarding.canAutomate
-                  ? 'El siguiente paso abre Meta para seleccionar negocio, cuenta WhatsApp y número.'
-                  : 'Para automatizar desde la interfaz falta configurar el alta guiada de Meta; mientras tanto la pantalla guía el alta manual.'}
-            </p>
-          </div>
-          <div className="resource-list compact-resource-list">
-            <ResourceRow icon={Store} label="Ruta" value={whatsappPathLabel(currentPath)} />
-            <ResourceRow icon={MessageCircle} label="Número" value={onboarding.binding.displayPhoneNumber ?? 'Pendiente'} />
-            <ResourceRow icon={KeyRound} label="Referencia segura" value={onboarding.binding.accessTokenRef ?? tenant.config?.whatsapp?.accessTokenRef ?? 'Pendiente'} />
-          </div>
-          <div className="button-row">
-            <button
-              className="approve-btn"
-              disabled={!currentPath || Boolean(busyAction) || connected}
-              onClick={() => onAction('start', {})}
-              type="button"
-            >
-              <Send size={16} />
-              {onboarding.canAutomate ? 'Iniciar alta guiada' : 'Preparar guía'}
-            </button>
-            <button className="ghost-btn" type="button" onClick={onOpenConfig}>
-              <Settings2 size={16} />
-              Configuración avanzada
-            </button>
-          </div>
+          {connected ? (
+            <div className="whatsapp-connected-summary">
+              <CheckCircle2 size={20} />
+              <div>
+                <strong>WhatsApp conectado</strong>
+                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
+              </div>
+            </div>
+          ) : onboarding.canAutomate ? (
+            <>
+              <div className="manual-guide">
+                <strong>Listo para conectar</strong>
+                <p>Al continuar se abrirá una ventana segura de Meta. No tendrás que copiar tokens ni identificadores.</p>
+              </div>
+              {requiresRegistrationPin && (
+                <label className="whatsapp-pin-field">
+                  <span>Crea un PIN de seguridad de 6 dígitos</span>
+                  <input
+                    autoComplete="new-password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) => setRegistrationPin(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="••••••"
+                    type="password"
+                    value={registrationPin}
+                  />
+                  <small>Meta lo usa para proteger el número. Guárdalo: Ventas IA no lo almacena.</small>
+                </label>
+              )}
+              <button
+                className="approve-btn whatsapp-connect-button"
+                disabled={!canStart || Boolean(busyAction)}
+                onClick={() => onAction('start', { registrationPin })}
+                type="button"
+              >
+                <Send size={16} />
+                Conectar con Meta
+              </button>
+            </>
+          ) : (
+            <div className="whatsapp-unavailable">
+              <AlertTriangle size={20} />
+              <div>
+                <strong>La conexión automática se está activando</strong>
+                <p>No necesitas abrir Meta ni copiar datos. Este paso se habilitará cuando la plataforma termine su configuración segura.</p>
+                {isPlatformAdmin && (
+                  <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
+                    <Settings2 size={15} />
+                    Revisar como administrador
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {!connected && !onboarding.canAutomate && (
-        <div className="manual-guide manual-guide-wide">
-          <strong>La conexión manual no activa el canal por sí sola</strong>
-          <p>
-            El administrador debe configurar Meta o validar la conexión después del registro. Así evitamos guardar un número que no pertenezca a esta tienda ni usar credenciales compartidas.
-          </p>
-          <div className="button-row">
-            <a className="ghost-btn" href={onboarding.externalLinks?.businessSuite} target="_blank" rel="noreferrer">
-              <Building2 size={16} />
-              Abrir Meta Business
-            </a>
-            <button className="ghost-btn" type="button" onClick={onOpenConfig}>
-              <Settings2 size={16} />
-              Ver requisitos
-            </button>
-          </div>
-        </div>
-      )}
     </article>
   );
 }
