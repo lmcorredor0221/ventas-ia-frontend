@@ -451,6 +451,9 @@ async function launchMetaEmbeddedSignup(launch) {
       finish();
     };
     window.addEventListener('message', onMessage);
+    const extras = { setup: {} };
+    if (launch.featureType) extras.featureType = launch.featureType;
+    if (launch.sessionInfoVersion) extras.sessionInfoVersion = launch.sessionInfoVersion;
     FB.login((response) => {
       const code = response?.authResponse?.code;
       if (!code) {
@@ -461,9 +464,10 @@ async function launchMetaEmbeddedSignup(launch) {
       finish();
     }, {
       config_id: launch.configId,
+      auth_type: 'rerequest',
       response_type: launch.responseType ?? 'code',
       override_default_response_type: true,
-      extras: { sessionInfoVersion: launch.sessionInfoVersion ?? '3' },
+      extras,
     });
     window.setTimeout(() => fail(new Error('La autorización de WhatsApp tardó demasiado.')), 180000);
   });
