@@ -4132,11 +4132,11 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
       <div className="wizard-content-grid">
         {platformPending ? (
           <div className="whatsapp-pending-guide">
-            <span className="eyebrow">Estado de tu activación</span>
-            <h4>{currentPathInfo ? `Elegiste: ${currentPathInfo.title}` : 'Aún debes elegir una opción arriba.'}</h4>
+            <span className="eyebrow">Paso de tu tienda</span>
+            <h4>{currentPathInfo ? `Listo: elegiste “${currentPathInfo.title}”.` : 'Elige una opción arriba para completar tu primer paso.'}</h4>
             <p>
               {currentPathInfo
-                ? 'Tu elección quedó guardada. Por ahora no tienes que abrir Meta ni buscar códigos. Falta que Ventas IA habilite la conexión general con Meta; después este mismo lugar mostrará el botón para continuar.'
+                ? 'Tu elección quedó guardada. No necesitas abrir Meta ni buscar códigos por tu cuenta. El siguiente paso aparecerá aquí cuando Ventas IA termine de habilitar su conexión oficial con Meta.'
                 : 'Elige una de las tres opciones. Cuando la guardes, sabremos cómo guiarte y qué necesitarás más adelante.'}
             </p>
             {currentPathInfo && (
@@ -4245,8 +4245,31 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-unavailable">
               <AlertTriangle size={20} />
               <div>
-                <strong>{isPlatformAdmin ? platformBlock.title : currentPathInfo ? 'Tu elección está guardada. Falta habilitación de Ventas IA.' : 'Elige cómo usas WhatsApp para guardar tu primer paso.'}</strong>
-                <p>{isPlatformAdmin ? platformBlock.detail : currentPathInfo ? 'No tienes que conseguir tokens, identificadores ni enlaces de Meta. Cuando la conexión general esté lista, aparecerá aquí el botón “Conectar con Meta” para continuar de forma guiada.' : 'Elige una opción arriba. Es el único dato que necesitamos de tu tienda por ahora; la conexión con Meta depende de una habilitación interna de Ventas IA.'}</p>
+                <strong>{isPlatformAdmin ? platformBlock.title : currentPathInfo ? 'Siguiente paso pendiente: habilitación de Meta por Ventas IA.' : 'Primero elige cómo usas WhatsApp.'}</strong>
+                <p>{isPlatformAdmin ? platformBlock.detail : currentPathInfo ? 'La plataforma aún debe terminar su integración oficial con Meta. No falta ningún token, identificador ni enlace técnico de tu tienda.' : 'Elige una opción arriba. Es el único dato que necesitamos de tu tienda por ahora.'}</p>
+                {!isPlatformAdmin && currentPathInfo && (
+                  <>
+                    <div className="whatsapp-platform-steps" aria-label="Lo que sigue para conectar WhatsApp">
+                      <div className="is-done">
+                        <span>1</span>
+                        <p><strong>Tu tienda</strong> Ya indicó cómo usa WhatsApp.</p>
+                      </div>
+                      <div className="is-blocked">
+                        <span>2</span>
+                        <p><strong>Ventas IA</strong> Habilita una vez la conexión oficial con Meta.</p>
+                      </div>
+                      <div>
+                        <span>3</span>
+                        <p><strong>Tú en Meta</strong> Al habilitarse el botón, iniciarás sesión, elegirás o crearás el negocio y Meta te pedirá el número por SMS o llamada.</p>
+                      </div>
+                    </div>
+                    <button className="approve-btn whatsapp-connect-button" disabled type="button">
+                      <Send size={16} />
+                      Conectar con Meta
+                    </button>
+                    <small className="whatsapp-connect-hint">Este botón se habilita aquí. El número se ingresa y verifica dentro de la ventana segura de Meta, no en esta pantalla.</small>
+                  </>
+                )}
                 {isPlatformAdmin && (
                   <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
                     <Settings2 size={15} />
