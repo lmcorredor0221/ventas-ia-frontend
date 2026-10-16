@@ -477,6 +477,12 @@ function canAccessPlatformAdmin(auth) {
   return Boolean(auth?.isPlatformAdmin || auth?.user?.platformRole === 'platform_admin');
 }
 
+function ownerGuidedNextStep(status, isPlatformAdmin = false) {
+  if (isPlatformAdmin) return status?.nextStep;
+  const nextOwnerStep = (status?.checks ?? []).find((check) => !check.ok && check.key !== 'llm');
+  return nextOwnerStep?.key ?? status?.nextStep;
+}
+
 function App() {
   const initialRouteQuery = currentRouteQuery();
   const [tenantList, setTenantList] = useState(tenants);
@@ -515,6 +521,7 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
   const conversationSearchRef = useRef(null);
+  const onboardingRedirectedTenantIds = useRef(new Set());
 
   const tenant = tenantList.find((item) => item.id === tenantId) ?? tenantList[0] ?? tenants[0];
   const visibleConversations = conversationList.filter((item) => item.tenantId === tenantId);
@@ -526,6 +533,13 @@ function App() {
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
   const isPlatformAdmin = canAccessPlatformAdmin(auth);
   const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
+  const activationInProgress = Boolean(onboardingBundle?.status && !onboardingBundle.status.readyForOperation);
+  const visibleNavigationItems = activationInProgress && !isPlatformAdmin
+    ? [
+      ...navigationItems.filter(([key]) => key === 'onboarding'),
+      ...navigationItems.filter(([key]) => key !== 'onboarding'),
+    ]
+    : navigationItems;
   const routeQuery = currentRouteQuery();
   const appRoute = routeQuery?.get('app') === '1';
   const legalDocument = typeof window !== 'undefined' ? legalDocumentForPath(window.location.pathname) : null;
@@ -620,7 +634,16 @@ function App() {
         setUsageSummary(overview.usage ?? defaultUsageSummary(effectiveTenantId));
         const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(effectiveTenantId)}/status`, { credentials: 'include' });
         if (!cancelled && statusResponse.ok) {
-          setOnboardingBundle(await statusResponse.json());
+          const bundle = await statusResponse.json();
+          setOnboardingBundle(bundle);
+          if (
+            !isPlatformAdmin
+            && !bundle.status?.readyForOperation
+            && !onboardingRedirectedTenantIds.current.has(effectiveTenantId)
+          ) {
+            onboardingRedirectedTenantIds.current.add(effectiveTenantId);
+            setActiveView('onboarding');
+          }
         } else if (!cancelled) {
           setOnboardingBundle(null);
         }
@@ -770,6 +793,15 @@ function App() {
     setActiveView('approvals');
   }
 
+  function navigateToView(nextView) {
+    if (!isPlatformAdmin && activationInProgress && nextView === 'config') {
+      setOnboardingNotice('Sigue la puesta en marcha paso a paso. Las referencias técnicas se administran de forma segura y se muestran solo cuando la tienda esté lista.');
+      setActiveView('onboarding');
+      return;
+    }
+    setActiveView(nextView);
+  }
+
   async function updateTenantConfig(configPatch) {
     try {
       const response = await fetch(`/api/tenants/${encodeURIComponent(tenantId)}/config`, {
@@ -795,7 +827,7 @@ function App() {
       return;
     }
     if (action === 'config-whatsapp') {
-      setActiveView('config');
+      setActiveView('onboarding');
       return;
     }
     if (action === 'config-llm') {
@@ -1025,12 +1057,13 @@ function App() {
     }
   }
 
-  function applySession(session) {
+  function applySession(session, { startOnboarding = false } = {}) {
     setAuth(session);
     setAuthStatus('signed_in');
     setAuthRequired(false);
     setAuthError('');
     if (session.memberships?.[0]?.tenantId) setTenantId(session.memberships[0].tenantId);
+    if (startOnboarding) setActiveView('onboarding');
   }
 
   async function handleLogout() {
@@ -1066,7 +1099,7 @@ function App() {
     return (
       <TenantCreationView
         auth={auth}
-        onCreated={(session) => applySession(session)}
+        onCreated={(session) => applySession(session, { startOnboarding: true })}
       />
     );
   }
@@ -1105,11 +1138,11 @@ function App() {
         </label>
 
         <nav className="nav-stack">
-          {navigationItems.map(([key, Icon, label]) => (
+          {visibleNavigationItems.map(([key, Icon, label]) => (
             <button
-              className={activeView === key ? 'nav-item is-active' : 'nav-item'}
+              className={`${activeView === key ? 'nav-item is-active' : 'nav-item'} ${key === 'onboarding' && activationInProgress ? 'is-guided' : ''}`}
               key={key}
-              onClick={() => setActiveView(key)}
+              onClick={() => navigateToView(key)}
               type="button"
             >
               <Icon size={18} />
@@ -1181,7 +1214,7 @@ function App() {
             conversations={visibleConversations}
             events={visibleEvents}
             metrics={metrics}
-            onNavigate={setActiveView}
+            onNavigate={navigateToView}
             onSelectConversation={focusConversation}
             requests={visibleRequests}
             tools={toolList}
@@ -1263,7 +1296,7 @@ function App() {
             onAction={runOnboardingAction}
             onCatalogImport={runCatalogImport}
             onWhatsAppAction={runWhatsAppOnboarding}
-            onNavigate={setActiveView}
+            onNavigate={navigateToView}
             tenant={tenant}
           />
         )}
@@ -1291,7 +1324,7 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration onNavigate={setActiveView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
     </main>
   );
@@ -3357,18 +3390,19 @@ function onboardingTabForStep(step) {
 
 function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
-  const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
+  const guidedNextStep = ownerGuidedNextStep(status, isPlatformAdmin);
+  const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(guidedNextStep));
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
-  const next = nextOnboardingAction(status, isPlatformAdmin);
+  const next = nextOnboardingAction({ ...status, nextStep: guidedNextStep }, isPlatformAdmin);
   const completeCount = checks.filter((item) => item.ok).length;
   const progress = Math.round((completeCount / Math.max(checks.length, 1)) * 100);
   const workspace = bundle?.googleWorkspace;
   const googleConnection = bundle?.googleConnection;
   const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
   const subscription = status.subscription ?? bundle?.subscription;
-  const currentStep = enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
-  const currentMeta = currentStep?.meta ?? onboardingStepMeta(status.nextStep);
+  const currentStep = enrichedSteps.find((item) => item.key === guidedNextStep) ?? enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
+  const currentMeta = currentStep?.meta ?? onboardingStepMeta(guidedNextStep);
   const CurrentIcon = currentMeta.icon;
   const openNextStep = () => {
     if (next.action === 'config-whatsapp') {
@@ -3458,18 +3492,19 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   ];
 
   useEffect(() => {
-    setActiveOnboardingTab(onboardingTabForStep(status.nextStep));
-  }, [status.nextStep, tenant.id]);
+    setActiveOnboardingTab(onboardingTabForStep(guidedNextStep));
+  }, [guidedNextStep, tenant.id]);
 
   return (
     <section className="onboarding-layout">
       <div className="onboarding-hero">
         <div className="onboarding-hero-copy">
           <span className="eyebrow">Puesta en marcha guiada</span>
-          <h2>{tenant.name}</h2>
+          <h2>{status.readyForOperation ? tenant.name : `Dejemos ${tenant.name} lista`}</h2>
           <p>
-            Acompañamos la activación de la tienda paso a paso: pago de plataforma, Google del cliente,
-            estructura operativa, DeepSeek y WhatsApp aislado por tienda.
+            {status.readyForOperation
+              ? 'Tu tienda ya tiene lo necesario para recibir pedidos y mantenerlos organizados.'
+              : 'Te mostramos solo el siguiente paso. Ventas IA se encarga de la parte técnica de la plataforma.'}
           </p>
           <div className="hero-next">
             <CurrentIcon size={18} />
@@ -3488,10 +3523,17 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
             <RotateCcw size={16} />
             Validar
           </button>
-          <button className="approve-btn" type="button" onClick={openNextStep} disabled={!next.action || Boolean(busyAction)}>
-            <Check size={16} />
-            {busyAction ? 'Procesando' : next.label}
-          </button>
+          {next.action ? (
+            <button className="approve-btn" type="button" onClick={openNextStep} disabled={Boolean(busyAction)}>
+              <Check size={16} />
+              {busyAction ? 'Procesando' : next.label}
+            </button>
+          ) : (
+            <div className="onboarding-waiting">
+              <Clock3 size={16} />
+              <span>{next.label}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -4302,6 +4344,14 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
       detail: 'La validación de prerequisitos está completa; falta marcar la tienda como operativa.',
     };
   }
+  if (status.nextStep === 'llm' && !isPlatformAdmin) {
+    return {
+      action: null,
+      label: 'Preparación de plataforma',
+      title: 'Estamos dejando listo el motor de atención',
+      detail: 'Este paso lo administra Ventas IA. No necesitas configurar nada ni compartir una clave.',
+    };
+  }
   const stepAction = onboardingStepAction(status.nextStep);
   const titles = {
     subscription: ['Validar suscripción', 'El acceso depende del pago mensual de la plataforma en Mercado Pago.'],
@@ -4316,7 +4366,7 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
     label: stepAction.label,
     title,
     detail,
-    secondary: status.nextStep === 'llm' ? { label: 'Abrir configuración', view: 'config' } : null,
+    secondary: status.nextStep === 'llm' && isPlatformAdmin ? { label: 'Abrir configuración', view: 'config' } : null,
   };
 }
 
