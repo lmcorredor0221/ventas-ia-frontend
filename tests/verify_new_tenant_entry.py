@@ -73,8 +73,10 @@ def main():
         page.goto(BASE_URL)
         expect(page.get_by_text("Dejemos Tienda Nueva lista")).to_be_visible()
         expect(page.get_by_role("tab", name="WhatsApp Pendiente")).to_have_attribute("aria-selected", "true")
-        expect(page.get_by_text("Tu tienda ya completó lo que depende de ella.")).to_be_visible()
-        expect(page.get_by_text("No necesitas configurar nada más por ahora.")).to_be_visible()
+        expect(page.get_by_text("Cuando se active el botón, esto es lo único que necesitarás.")).to_be_visible()
+        expect(page.get_by_text("Tu acceso a Facebook o Meta")).to_be_visible()
+        expect(page.get_by_text("El celular con el número de la tienda")).to_be_visible()
+        expect(page.get_by_text("No tendrás que buscar identificadores, tokens, enlaces de webhook ni códigos técnicos en Meta.")).to_be_visible()
 
         page.get_by_role("button", name="Revisar mi catálogo").click()
         expect(page.get_by_text("Guía para dejar Drive y Sheets listos")).to_be_visible()

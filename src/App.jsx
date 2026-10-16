@@ -4070,6 +4070,20 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
       detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
     };
   const platformPending = !connected && !onboarding.canAutomate;
+  const connectionChecklist = [
+    {
+      title: 'Tu acceso a Facebook o Meta',
+      detail: 'Usa la cuenta que administra el negocio. Si todavía no existe un negocio en Meta, podrás crearlo durante el proceso.',
+    },
+    {
+      title: 'El celular con el número de la tienda',
+      detail: 'Meta enviará un código por SMS o llamada para confirmar que el número es de tu negocio.',
+    },
+    {
+      title: 'El nombre visible de la tienda',
+      detail: 'Meta te pedirá revisar el nombre y la categoría que verán tus clientes en WhatsApp.',
+    },
+  ];
   return (
     <article className="guide-panel whatsapp-wizard">
       <div className="wizard-heading">
@@ -4109,12 +4123,27 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
       <div className="wizard-content-grid">
         {platformPending ? (
           <div className="whatsapp-pending-guide">
-            <span className="eyebrow">Tu siguiente paso</span>
-            <h4>Tu tienda ya completó lo que depende de ella.</h4>
+            <span className="eyebrow">Prepárate para conectar tu número</span>
+            <h4>Cuando se active el botón, esto es lo único que necesitarás.</h4>
             <p>
-              La conexión automática con WhatsApp se abrirá desde esta misma pantalla cuando Ventas IA termine
-              la activación general con Meta. No necesitas crear una cuenta, copiar códigos ni cambiar nada en tu WhatsApp.
+              La conexión se abrirá desde esta misma pantalla. Meta te llevará paso a paso y Ventas IA guardará
+              la conexión de forma segura para tu tienda.
             </p>
+            <div className="whatsapp-readiness-list">
+              {connectionChecklist.map((item, index) => (
+                <div className="whatsapp-readiness-item" key={item.title}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{item.title}</strong>
+                    <p>{item.detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="whatsapp-no-technical-info">
+              <ShieldCheck size={18} />
+              <p>No tendrás que buscar identificadores, tokens, enlaces de webhook ni códigos técnicos en Meta.</p>
+            </div>
             <div className="whatsapp-pending-actions">
               <button className="approve-btn" type="button" onClick={() => onSelectOnboardingTab('google')}>
                 <Database size={16} />
@@ -4129,16 +4158,16 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         ) : (
         <div className="whatsapp-flow-summary">
           <div>
-            <span>1</span>
-            <div><strong>Indícanos cómo usas WhatsApp hoy</strong><p>Escoge la opción que más se parezca a tu tienda.</p></div>
+              <span>1</span>
+              <div><strong>Elige cómo usas WhatsApp hoy</strong><p>Cuéntanos si ya tienes WhatsApp Business, una integración oficial o si empiezas desde cero.</p></div>
           </div>
           <div>
-            <span>2</span>
-            <div><strong>Confirma el negocio y el número en Meta</strong><p>Meta protege tu cuenta y puede pedirte un código por SMS o llamada.</p></div>
+              <span>2</span>
+              <div><strong>Confirma el negocio y el número</strong><p>En la ventana de Meta inicia sesión, elige o crea tu negocio y recibe un código por SMS o llamada.</p></div>
           </div>
           <div>
-            <span>3</span>
-            <div><strong>Queda listo para recibir pedidos</strong><p>Ventas IA valida el número, conecta los mensajes y hace una prueba.</p></div>
+              <span>3</span>
+              <div><strong>Vuelve y prueba tu canal</strong><p>Ventas IA valida la conexión y te acompaña con una conversación de prueba antes de recibir pedidos.</p></div>
           </div>
         </div>
         )}
@@ -4155,7 +4184,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <>
               <div className="manual-guide">
                 <strong>Listo para conectar</strong>
-                <p>Al continuar se abrirá una ventana segura de Meta. No tendrás que copiar tokens ni identificadores.</p>
+                <p>Al continuar se abrirá una ventana segura de Meta. Ten a mano el celular con tu número y el acceso al negocio. No tendrás que copiar tokens ni identificadores.</p>
               </div>
               {requiresRegistrationPin && (
                 <label className="whatsapp-pin-field">
@@ -4186,8 +4215,8 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-unavailable">
               <AlertTriangle size={20} />
               <div>
-                <strong>{isPlatformAdmin ? platformBlock.title : 'Estamos habilitando WhatsApp para tu tienda'}</strong>
-                <p>{isPlatformAdmin ? platformBlock.detail : 'No necesitas configurar nada más por ahora. Cuando esté disponible, encontrarás aquí el botón para conectar tu número con Meta de forma guiada.'}</p>
+                <strong>{isPlatformAdmin ? platformBlock.title : 'La conexión con Meta aún no está disponible'}</strong>
+                <p>{isPlatformAdmin ? platformBlock.detail : 'Ya puedes preparar tu acceso a Meta, el celular con el número y el nombre de tu tienda. El botón “Conectar con Meta” aparecerá aquí cuando la plataforma termine su activación general.'}</p>
                 {isPlatformAdmin && (
                   <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
                     <Settings2 size={15} />
