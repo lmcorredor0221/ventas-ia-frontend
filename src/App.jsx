@@ -413,7 +413,7 @@ function isTrustedMetaOrigin(origin) {
 
 async function launchMetaEmbeddedSignup(launch) {
   if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
-  const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
+  const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v26.0');
   return new Promise((resolve, reject) => {
     let loginCode = '';
     let sessionInfo = null;
@@ -463,7 +463,7 @@ async function launchMetaEmbeddedSignup(launch) {
       config_id: launch.configId,
       response_type: launch.responseType ?? 'code',
       override_default_response_type: true,
-      extras: { sessionInfoVersion: '3' },
+      extras: { sessionInfoVersion: launch.sessionInfoVersion ?? '3' },
     });
     window.setTimeout(() => fail(new Error('La autorización de WhatsApp tardó demasiado.')), 180000);
   });
@@ -915,6 +915,7 @@ function App() {
       intent: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/intent`,
       reset: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/reset`,
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
+      renew: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/renew`,
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
     };
@@ -929,10 +930,10 @@ function App() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error ?? `WhatsApp ${response.status}`);
-      if (action === 'start' && result.launch?.authorizationUrl) {
+      if (['start', 'renew'].includes(action) && result.launch?.authorizationUrl) {
         window.open(result.launch.authorizationUrl, '_blank', 'noopener,noreferrer');
       }
-      if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
+      if (['start', 'renew'].includes(action) && result.mode === 'embedded_signup' && result.launch) {
         const signup = await launchMetaEmbeddedSignup(result.launch);
         const completionPayload = {
           ...signup,
@@ -4061,7 +4062,9 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const currentPath = onboarding.setupPath;
   const currentPathInfo = paths.find((path) => path.key === currentPath) ?? null;
   const connected = onboarding.status === 'connected';
-  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
+  const tokenHealth = onboarding.token ?? {};
+  const renewalRequired = connected && Boolean(tokenHealth.renewalRequired);
+  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing' && !renewalRequired;
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
   const platformBlock = onboarding.reason === 'meta_webhook_not_configured'
     ? {
@@ -4208,6 +4211,18 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <div>
                 <strong>WhatsApp conectado</strong>
                 <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
+                {tokenHealth.message && <p className={`whatsapp-token-note is-${tokenHealth.status ?? 'unknown'}`}>{tokenHealth.message}</p>}
+                {renewalRequired && (
+                  <button
+                    className="ghost-btn compact whatsapp-renew-button"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => onAction('renew')}
+                    type="button"
+                  >
+                    <RotateCcw size={15} />
+                    {busyAction === 'whatsapp-renew' ? 'Abriendo Meta' : 'Renovar acceso con Meta'}
+                  </button>
+                )}
               </div>
             </div>
           ) : onboarding.canAutomate ? (

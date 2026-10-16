@@ -4974,6 +4974,19 @@ select:disabled {
   line-height: 1.4;
 }
 
+.whatsapp-token-note {
+  padding-top: 4px;
+}
+
+.whatsapp-token-note.is-expiring_soon,
+.whatsapp-token-note.is-expired {
+  color: #9a4c1d;
+}
+
+.whatsapp-renew-button {
+  margin-top: 10px;
+}
+
 .whatsapp-unavailable .ghost-btn {
   margin-top: 10px;
 }
