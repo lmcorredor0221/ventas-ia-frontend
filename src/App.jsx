@@ -3370,6 +3370,13 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const currentStep = enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
   const currentMeta = currentStep?.meta ?? onboardingStepMeta(status.nextStep);
   const CurrentIcon = currentMeta.icon;
+  const openNextStep = () => {
+    if (next.action === 'config-whatsapp') {
+      setActiveOnboardingTab('whatsapp');
+      return;
+    }
+    onAction(next.action);
+  };
   const operationLabel = status.readyForOperation
     ? 'Operación habilitada'
     : status.readyForActivation
@@ -3481,7 +3488,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
             <RotateCcw size={16} />
             Validar
           </button>
-          <button className="approve-btn" type="button" onClick={() => onAction(next.action)} disabled={!next.action || Boolean(busyAction)}>
+          <button className="approve-btn" type="button" onClick={openNextStep} disabled={!next.action || Boolean(busyAction)}>
             <Check size={16} />
             {busyAction ? 'Procesando' : next.label}
           </button>
@@ -3657,6 +3664,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
         onboarding={whatsappOnboarding}
         onAction={onWhatsAppAction}
         isPlatformAdmin={isPlatformAdmin}
+        onNavigate={onNavigate}
         onOpenPlatformControl={() => onNavigate('admin')}
         tenant={tenant}
       />
@@ -3979,7 +3987,7 @@ function onboardingDetailLabel(check) {
   return check.detail ?? 'Pendiente';
 }
 
-function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onOpenPlatformControl, tenant }) {
+function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onNavigate, onOpenPlatformControl, tenant }) {
   const paths = [
     {
       key: 'cloud_api_existing',
@@ -4005,6 +4013,16 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const connected = onboarding.status === 'connected';
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
+  const platformBlock = onboarding.reason === 'meta_webhook_not_configured'
+    ? {
+      title: 'Estamos terminando de habilitar el canal de mensajes',
+      detail: 'Tu tienda ya eligió cómo conectarse. Falta activar una vez el receptor seguro de mensajes de Meta para toda la plataforma. No debes copiar datos ni hacer nada en Meta todavía.',
+    }
+    : {
+      title: 'Meta aún no está habilitado en Ventas IA',
+      detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
+    };
+  const platformPending = !connected && !onboarding.canAutomate;
   return (
     <article className="guide-panel whatsapp-wizard">
       <div className="wizard-heading">
@@ -4018,7 +4036,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         </span>
       </div>
 
-      <div className="whatsapp-path-grid">
+      {!platformPending && <div className="whatsapp-path-grid">
         {paths.map((path) => (
           <button
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
@@ -4039,9 +4057,29 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <strong>{path.detail}</strong>
           </button>
         ))}
-      </div>
+      </div>}
 
       <div className="wizard-content-grid">
+        {platformPending ? (
+          <div className="whatsapp-pending-guide">
+            <span className="eyebrow">Tu siguiente paso</span>
+            <h4>Tu tienda ya completó lo que depende de ella.</h4>
+            <p>
+              La conexión automática con WhatsApp se abrirá desde esta misma pantalla cuando Ventas IA termine
+              la activación general con Meta. No necesitas crear una cuenta, copiar códigos ni cambiar nada en tu WhatsApp.
+            </p>
+            <div className="whatsapp-pending-actions">
+              <button className="approve-btn" type="button" onClick={() => onNavigate('google')}>
+                <Database size={16} />
+                Revisar mi catálogo
+              </button>
+              <button className="ghost-btn" type="button" onClick={() => onNavigate('test')}>
+                <Play size={16} />
+                Conocer la prueba guiada
+              </button>
+            </div>
+          </div>
+        ) : (
         <div className="whatsapp-flow-summary">
           <div>
             <span>1</span>
@@ -4056,6 +4094,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div><strong>Queda listo para recibir pedidos</strong><p>Ventas IA valida el número, conecta los mensajes y hace una prueba.</p></div>
           </div>
         </div>
+        )}
         <div className="whatsapp-sidecar">
           {connected ? (
             <div className="whatsapp-connected-summary">
@@ -4100,12 +4139,12 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-unavailable">
               <AlertTriangle size={20} />
               <div>
-                <strong>La conexión automática se está activando</strong>
-                <p>No necesitas abrir Meta ni copiar datos. Este paso se habilitará cuando la plataforma termine su configuración segura.</p>
+                <strong>{isPlatformAdmin ? platformBlock.title : 'Estamos habilitando WhatsApp para tu tienda'}</strong>
+                <p>{isPlatformAdmin ? platformBlock.detail : 'No necesitas configurar nada más por ahora. Cuando esté disponible, encontrarás aquí el botón para conectar tu número con Meta de forma guiada.'}</p>
                 {isPlatformAdmin && (
                   <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
                     <Settings2 size={15} />
-                    Revisar como administrador
+                    Revisar configuración de plataforma
                   </button>
                 )}
               </div>
@@ -4233,7 +4272,7 @@ function onboardingStepAction(key) {
     google_oauth: { key: 'google-oauth', label: 'Conectar Google', icon: <UserCheck size={15} /> },
     google_provisioning: { key: 'provision', label: 'Provisionar', icon: <Database size={15} /> },
     llm: { key: 'config-llm', label: 'Configurar', icon: <Bot size={15} /> },
-    whatsapp: { key: 'config-whatsapp', label: 'Configurar', icon: <MessageCircle size={15} /> },
+    whatsapp: { key: 'config-whatsapp', label: 'Ver conexión WhatsApp', icon: <MessageCircle size={15} /> },
   };
   return action[key] ?? { key: 'validate', label: 'Validar', icon: <RotateCcw size={15} /> };
 }
@@ -4269,7 +4308,7 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
     google_oauth: ['Conectar Google', 'La microapp necesita autorización segura para crear y leer los archivos del cliente.'],
     google_provisioning: ['Crear estructura Google', 'Se deben aprovisionar Drive y Google Sheets con catálogo, clientes y pedidos.'],
     llm: ['Revisar Motor IA de la plataforma', 'El motor se administra desde Centro de control y se consume transversalmente.'],
-    whatsapp: ['Separar WhatsApp por tienda', 'La conexión solo debe aceptar mensajes del identificador configurado para esta tienda.'],
+    whatsapp: ['Conectar WhatsApp', 'El siguiente paso te mostrará cómo conectar el número de tu tienda de forma segura.'],
   };
   const [title, detail] = titles[status.nextStep] ?? ['Completar configuración', 'Hay controles pendientes antes de activar operación.'];
   return {
@@ -4277,7 +4316,7 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
     label: stepAction.label,
     title,
     detail,
-    secondary: ['llm', 'whatsapp'].includes(status.nextStep) ? { label: 'Abrir configuración', view: 'config' } : null,
+    secondary: status.nextStep === 'llm' ? { label: 'Abrir configuración', view: 'config' } : null,
   };
 }
 

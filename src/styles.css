@@ -4721,6 +4721,40 @@ select:disabled {
   line-height: 1.4;
 }
 
+.whatsapp-pending-guide {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid rgba(23, 50, 77, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.whatsapp-pending-guide h4,
+.whatsapp-pending-guide p {
+  margin: 0;
+}
+
+.whatsapp-pending-guide h4 {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.whatsapp-pending-guide p {
+  max-width: 60ch;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.whatsapp-pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 2px;
+}
+
 .whatsapp-pin-field {
   display: grid;
   gap: 7px;
