@@ -4607,6 +4607,33 @@ select:disabled {
   gap: 10px;
 }
 
+.whatsapp-path-guide {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  border-left: 3px solid var(--green);
+  background: rgba(39, 122, 105, 0.07);
+}
+
+.whatsapp-path-guide span {
+  color: var(--green);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.whatsapp-path-guide strong {
+  color: var(--ink);
+  font-size: 0.92rem;
+}
+
+.whatsapp-path-guide p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
 .whatsapp-path {
   min-height: 112px;
   display: grid;
@@ -4780,6 +4807,31 @@ select:disabled {
   flex-wrap: wrap;
   gap: 9px;
   margin-top: 2px;
+}
+
+.whatsapp-choice-summary {
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+  border: 1px solid rgba(23, 50, 77, 0.12);
+  border-radius: 7px;
+  background: rgba(23, 50, 77, 0.04);
+}
+
+.whatsapp-choice-summary strong {
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.whatsapp-choice-summary p {
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.whatsapp-reset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .whatsapp-readiness-list {

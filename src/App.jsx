@@ -913,6 +913,7 @@ function App() {
     setOnboardingError('');
     const routes = {
       intent: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/intent`,
+      reset: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/reset`,
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
@@ -4056,7 +4057,9 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
     },
   ];
   const [registrationPin, setRegistrationPin] = useState('');
+  const [confirmReset, setConfirmReset] = useState(false);
   const currentPath = onboarding.setupPath;
+  const currentPathInfo = paths.find((path) => path.key === currentPath) ?? null;
   const connected = onboarding.status === 'connected';
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
@@ -4090,21 +4093,27 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         <div>
           <span className="eyebrow">Activación WhatsApp Business</span>
           <h3>Conecta el WhatsApp de tu tienda</h3>
-          <p>Elige tu punto de partida. Después Meta te pedirá iniciar sesión, confirmar el negocio y verificar el número. Ventas IA completa lo técnico.</p>
+          <p>Primero dinos cómo usas WhatsApp hoy. Con esa respuesta te mostraremos el único paso que sigue.</p>
         </div>
         <span className={`automation-chip ${onboarding.canAutomate ? 'is-ready' : 'is-manual'}`}>
           {connected ? 'Canal conectado' : onboarding.canAutomate ? 'Conexión automática' : 'Activación pendiente'}
         </span>
       </div>
 
-      {!platformPending && <div className="whatsapp-path-grid">
+      <div className="whatsapp-path-guide">
+        <span>Tu primer paso</span>
+        <strong>Elige la opción que más se parece a tu tienda.</strong>
+        <p>Esto no conecta nada todavía. Solo guarda tu punto de partida para guiarte sin pedirte datos técnicos.</p>
+      </div>
+      <div className="whatsapp-path-grid">
         {paths.map((path) => (
           <button
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
-            disabled={busyAction === 'whatsapp-intent' || connected}
+            disabled={Boolean(busyAction) || connected}
             key={path.key}
             onClick={() => {
               setRegistrationPin('');
+              setConfirmReset(false);
               onAction('intent', {
                 setupPath: path.key,
                 hasWhatsAppBusiness: path.hasWhatsAppBusiness,
@@ -4118,17 +4127,38 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <strong>{path.detail}</strong>
           </button>
         ))}
-      </div>}
+      </div>
 
       <div className="wizard-content-grid">
         {platformPending ? (
           <div className="whatsapp-pending-guide">
-            <span className="eyebrow">Prepárate para conectar tu número</span>
-            <h4>Cuando se active el botón, esto es lo único que necesitarás.</h4>
+            <span className="eyebrow">Estado de tu activación</span>
+            <h4>{currentPathInfo ? `Elegiste: ${currentPathInfo.title}` : 'Aún debes elegir una opción arriba.'}</h4>
             <p>
-              La conexión se abrirá desde esta misma pantalla. Meta te llevará paso a paso y Ventas IA guardará
-              la conexión de forma segura para tu tienda.
+              {currentPathInfo
+                ? 'Tu elección quedó guardada. Por ahora no tienes que abrir Meta ni buscar códigos. Falta que Ventas IA habilite la conexión general con Meta; después este mismo lugar mostrará el botón para continuar.'
+                : 'Elige una de las tres opciones. Cuando la guardes, sabremos cómo guiarte y qué necesitarás más adelante.'}
             </p>
+            {currentPathInfo && (
+              <div className="whatsapp-choice-summary">
+                <strong>¿Quieres cambiar tu respuesta?</strong>
+                <p>El reinicio borra solo la elección y los datos de preparación de WhatsApp de esta tienda. No cambia tu plan, Google, catálogo, pedidos ni conversaciones.</p>
+                {!confirmReset ? (
+                  <button className="ghost-btn compact" disabled={Boolean(busyAction)} onClick={() => setConfirmReset(true)} type="button">
+                    Cambiar mi elección
+                  </button>
+                ) : (
+                  <div className="whatsapp-reset-actions">
+                    <button className="reject-btn compact" disabled={Boolean(busyAction)} onClick={() => { setConfirmReset(false); onAction('reset'); }} type="button">
+                      Sí, reiniciar WhatsApp
+                    </button>
+                    <button className="ghost-btn compact" disabled={Boolean(busyAction)} onClick={() => setConfirmReset(false)} type="button">
+                      Conservar mi elección
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="whatsapp-readiness-list">
               {connectionChecklist.map((item, index) => (
                 <div className="whatsapp-readiness-item" key={item.title}>
@@ -4215,8 +4245,8 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-unavailable">
               <AlertTriangle size={20} />
               <div>
-                <strong>{isPlatformAdmin ? platformBlock.title : 'La conexión con Meta aún no está disponible'}</strong>
-                <p>{isPlatformAdmin ? platformBlock.detail : 'Ya puedes preparar tu acceso a Meta, el celular con el número y el nombre de tu tienda. El botón “Conectar con Meta” aparecerá aquí cuando la plataforma termine su activación general.'}</p>
+                <strong>{isPlatformAdmin ? platformBlock.title : currentPathInfo ? 'Tu elección está guardada. Falta habilitación de Ventas IA.' : 'Elige cómo usas WhatsApp para guardar tu primer paso.'}</strong>
+                <p>{isPlatformAdmin ? platformBlock.detail : currentPathInfo ? 'No tienes que conseguir tokens, identificadores ni enlaces de Meta. Cuando la conexión general esté lista, aparecerá aquí el botón “Conectar con Meta” para continuar de forma guiada.' : 'Elige una opción arriba. Es el único dato que necesitamos de tu tienda por ahora; la conexión con Meta depende de una habilitación interna de Ventas IA.'}</p>
                 {isPlatformAdmin && (
                   <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
                     <Settings2 size={15} />
