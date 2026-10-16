@@ -76,6 +76,14 @@ def main():
         expect(page.get_by_text("Tu tienda ya completó lo que depende de ella.")).to_be_visible()
         expect(page.get_by_text("No necesitas configurar nada más por ahora.")).to_be_visible()
 
+        page.get_by_role("button", name="Revisar mi catálogo").click()
+        expect(page.get_by_text("Guía para dejar Drive y Sheets listos")).to_be_visible()
+        expect(page.get_by_text("Carga tus productos desde CSV")).to_be_visible()
+
+        page.get_by_role("tab", name="WhatsApp Pendiente").click()
+        page.get_by_role("button", name="Conocer la prueba guiada").click()
+        expect(page.get_by_text("Antes de publicar, valida una conversación completa")).to_be_visible()
+
         page.get_by_role("button", name="Configuración", exact=True).click()
         expect(page.get_by_text("Puesta en marcha guiada")).to_be_visible()
         expect(page.get_by_text("Parámetros de la tienda")).to_have_count(0)

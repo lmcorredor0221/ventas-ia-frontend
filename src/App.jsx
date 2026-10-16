@@ -794,6 +794,11 @@ function App() {
   }
 
   function navigateToView(nextView) {
+    if (!viewHeader[nextView]) {
+      setActiveView('onboarding');
+      return;
+    }
+
     if (!isPlatformAdmin && activationInProgress && nextView === 'config') {
       setOnboardingNotice('Sigue la puesta en marcha paso a paso. Las referencias técnicas se administran de forma segura y se muestran solo cuando la tienda esté lista.');
       setActiveView('onboarding');
@@ -3706,7 +3711,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
         onboarding={whatsappOnboarding}
         onAction={onWhatsAppAction}
         isPlatformAdmin={isPlatformAdmin}
-        onNavigate={onNavigate}
+        onSelectOnboardingTab={setActiveOnboardingTab}
         onOpenPlatformControl={() => onNavigate('admin')}
         tenant={tenant}
       />
@@ -4029,7 +4034,7 @@ function onboardingDetailLabel(check) {
   return check.detail ?? 'Pendiente';
 }
 
-function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onNavigate, onOpenPlatformControl, tenant }) {
+function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onOpenPlatformControl, onSelectOnboardingTab, tenant }) {
   const paths = [
     {
       key: 'cloud_api_existing',
@@ -4111,11 +4116,11 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               la activación general con Meta. No necesitas crear una cuenta, copiar códigos ni cambiar nada en tu WhatsApp.
             </p>
             <div className="whatsapp-pending-actions">
-              <button className="approve-btn" type="button" onClick={() => onNavigate('google')}>
+              <button className="approve-btn" type="button" onClick={() => onSelectOnboardingTab('google')}>
                 <Database size={16} />
                 Revisar mi catálogo
               </button>
-              <button className="ghost-btn" type="button" onClick={() => onNavigate('test')}>
+              <button className="ghost-btn" type="button" onClick={() => onSelectOnboardingTab('test')}>
                 <Play size={16} />
                 Conocer la prueba guiada
               </button>
