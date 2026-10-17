@@ -4070,12 +4070,16 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const renewalRequired = connected && Boolean(tokenHealth.renewalRequired);
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing' && !renewalRequired;
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
+  const approvalPending = onboarding.reason === 'meta_approval_pending';
   const platformBlock = onboarding.reason === 'meta_webhook_not_configured'
     ? {
       title: 'Estamos terminando de habilitar el canal de mensajes',
       detail: 'Tu tienda ya eligió cómo conectarse. Falta activar una vez el receptor seguro de mensajes de Meta para toda la plataforma. No debes copiar datos ni hacer nada en Meta todavía.',
     }
-    : {
+    : approvalPending ? {
+      title: 'Ventas IA espera la aprobación de Meta',
+      detail: 'La app y el canal ya están configurados. Falta que Meta autorice a Ventas IA para conectar los WhatsApp de otras tiendas. Esta aprobación es de la plataforma y se solicita una sola vez.',
+    } : {
       title: 'Meta aún no está habilitado en Ventas IA',
       detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
     };
@@ -4143,7 +4147,9 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <h4>{currentPathInfo ? `Listo: elegiste “${currentPathInfo.title}”.` : 'Elige una opción arriba para completar tu primer paso.'}</h4>
             <p>
               {currentPathInfo
-                ? 'Tu elección quedó guardada. No necesitas abrir Meta ni buscar códigos por tu cuenta. El siguiente paso aparecerá aquí cuando Ventas IA termine de habilitar su conexión oficial con Meta.'
+                ? approvalPending
+                  ? 'Tu elección quedó guardada. Meta está pendiente de autorizar a Ventas IA para conectar tiendas. Cuando apruebe la plataforma, aquí aparecerá el botón para conectar tu número.'
+                  : 'Tu elección quedó guardada. No necesitas abrir Meta ni buscar códigos por tu cuenta. El siguiente paso aparecerá aquí cuando Ventas IA termine de habilitar su conexión oficial con Meta.'
                 : 'Elige una de las tres opciones. Cuando la guardes, sabremos cómo guiarte y qué necesitarás más adelante.'}
             </p>
             {currentPathInfo && (
@@ -4265,7 +4271,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <AlertTriangle size={20} />
               <div>
                 <strong>{isPlatformAdmin ? platformBlock.title : currentPathInfo ? 'Siguiente paso pendiente: habilitación de Meta por Ventas IA.' : 'Primero elige cómo usas WhatsApp.'}</strong>
-                <p>{isPlatformAdmin ? platformBlock.detail : currentPathInfo ? 'La plataforma aún debe terminar su integración oficial con Meta. No falta ningún token, identificador ni enlace técnico de tu tienda.' : 'Elige una opción arriba. Es el único dato que necesitamos de tu tienda por ahora.'}</p>
+                <p>{isPlatformAdmin ? platformBlock.detail : currentPathInfo ? approvalPending ? 'Meta debe aprobar a Ventas IA para conectar tiendas. Tu tienda ya está preparada; no te falta ningún dato técnico.' : 'La plataforma aún debe terminar su integración oficial con Meta. No falta ningún token, identificador ni enlace técnico de tu tienda.' : 'Elige una opción arriba. Es el único dato que necesitamos de tu tienda por ahora.'}</p>
                 {!isPlatformAdmin && currentPathInfo && (
                   <>
                     <div className="whatsapp-platform-steps" aria-label="Lo que sigue para conectar WhatsApp">
