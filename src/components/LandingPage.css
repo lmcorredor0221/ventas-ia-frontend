@@ -249,16 +249,23 @@
   .shop-samples { order: 2; justify-self: center; margin: 18px 0 0; }
   .shop-samples button { min-height: 30px; padding-inline: 12px; font-size: 11px; }
   .shop-demo-scene { order: 1; grid-template-columns: 1fr; gap: 10px; margin-top: 8px; }
-  .shop-chat { display: flex; align-items: center; gap: 8px; padding-bottom: 0; }
-  .shop-chat-heading { margin: 0; }
-  .shop-chat-heading > div { display: none; }
+  .shop-chat { display: block; padding-bottom: 0; }
+  .shop-chat-heading { margin: 0 0 7px; }
+  .shop-chat-heading > div { display: block; }
   .shop-chat-icon { width: 24px; height: 24px; }
   .shop-chat-icon svg { width: 14px; }
-  .shop-chat-heading b { font-size: 9px; }
-  .shop-chat-heading div > span { display: none; }
-  .shop-message { padding: 9px 11px; flex: 1; }
+  .shop-chat-heading b { font-size: 10px; }
+  .shop-chat-heading div > span { display: block; font-size: 8px; margin-top: 2px; }
+  .shop-message { padding: 9px 11px; }
   .shop-message p { font-size: 12px; line-height: 1.4; }
-  .shop-message > span, .shop-chat-reply, .shop-address-reply { display: none; }
+  .shop-message > span { display: none; }
+  .shop-chat-reply, .shop-address-reply { display: block; max-height: 0; overflow: hidden; opacity: 0; transform: translateY(-3px); margin: 0; padding: 0; transition: max-height .3s ease, opacity .3s ease, transform .3s ease, margin .3s ease, padding .3s ease; }
+  .shop-chat-reply.is-revealed { max-height: 65px; margin: 8px 0 0 9px; padding: 8px; transform: translateY(0); }
+  .shop-chat-reply b { font-size: 9px; margin-bottom: 3px; }
+  .shop-chat-reply > span { font-size: 10px; line-height: 1.3; }
+  .shop-address-reply { display: flex; }
+  .shop-address-reply.is-revealed { max-height: 24px; margin-top: 7px; padding: 0; transform: translateY(0); }
+  .shop-address-reply svg { width: 12px; height: 12px; }
   .shop-transform { display: none; }
   .shop-receipt { padding: 12px 14px 10px; }
   .shop-receipt-head { gap: 8px; padding-bottom: 9px; }

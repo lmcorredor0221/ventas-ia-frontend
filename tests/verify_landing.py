@@ -56,6 +56,19 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="Tomado · volver al ejemplo", exact=True).click()
     page.get_by_role("button", name="Tienda", exact=True).click()
 
+    # The mobile demo must expose the intermediate chat states, not only update
+    # an attribute that is hidden by the responsive CSS.
+    mobile_demo = browser.new_page(viewport={"width": 390, "height": 844})
+    open_landing(mobile_demo)
+    mobile_demo.get_by_role("button", name="Repetir demostración").click()
+    expect(mobile_demo.locator(".shop-demo-scene")).to_have_attribute("data-stage", "1", timeout=3000)
+    assert mobile_demo.locator(".shop-chat-reply").evaluate("el => getComputedStyle(el).display") != "none"
+    assert mobile_demo.locator(".shop-chat-reply").bounding_box()["height"] > 0
+    expect(mobile_demo.locator(".shop-demo-scene")).to_have_attribute("data-stage", "2", timeout=3000)
+    assert mobile_demo.locator(".shop-address-reply").evaluate("el => getComputedStyle(el).display") != "none"
+    assert mobile_demo.locator(".shop-address-reply").bounding_box()["height"] > 0
+    mobile_demo.close()
+
     for name, width, height, path in [
         ("desktop", 1440, 1000, "/"),
         ("desktop-alias", 1280, 900, "/landing"),
