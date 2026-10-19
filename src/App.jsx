@@ -78,6 +78,7 @@ const statusLabel = {
   resolved: 'Resuelto',
   manual_active: 'Atención manual activa',
   closed_no_confirmation: 'Cerrado sin confirmar',
+  closed_dispatched: 'En camino y cerrado',
 };
 
 const statusIcon = {
@@ -87,6 +88,7 @@ const statusIcon = {
   degraded: Clock3,
   manual_active: UserCheck,
   closed_no_confirmation: Clock3,
+  closed_dispatched: CheckCircle2,
   needs_binding: PlugZap,
   sandbox_ready: ShieldCheck,
   resolved: BadgeCheck,
@@ -881,8 +883,9 @@ function App() {
       setTenantList((current) => current.map((item) => (item.id === updatedTenant.id ? updatedTenant : item)));
       setBackendStatus('connected');
       setRefreshKey((value) => value + 1);
-    } catch {
+    } catch (error) {
       setBackendStatus('offline');
+      throw error;
     }
   }
 
@@ -3074,6 +3077,7 @@ function ConversationPanel({
         <InfoLine icon={Search} label="Necesidad" value={conversation.need} />
         <InfoLine icon={ShoppingBag} label="Valor / etapa" value={`${conversation.value} · ${stageLabel(conversation.stage)}`} />
         <InfoLine icon={PlugZap} label="Herramienta" value={toolLabel(conversation.lastTool)} />
+        {conversation.aiExecution?.mode && <InfoLine icon={Bot} label="Interpretación" value={llmExecutionLabel(conversation.aiExecution.mode)} />}
       </div>
 
       {pendingRequest && (
@@ -3136,6 +3140,15 @@ function formatMessageTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Sin hora';
   return date.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+}
+
+function llmExecutionLabel(mode) {
+  const labels = {
+    provider_api: 'LLM de producción',
+    mock_structured_fallback: 'Simulación estructurada',
+    provider_unavailable_handoff: 'LLM no disponible: relevo humano',
+  };
+  return labels[mode] ?? mode;
 }
 
 function InfoLine({ icon: Icon, label, value }) {
@@ -6124,8 +6137,46 @@ function formatFullDateTime(value) {
   }).format(new Date(value));
 }
 
+const defaultPaymentMethods = [
+  { id: 'cash', label: 'Efectivo', aliases: ['efectivo', 'cash'] },
+  { id: 'card_terminal', label: 'Tarjeta', aliases: ['tarjeta', 'datafono', 'datáfono'] },
+  { id: 'breb', label: 'Bre-B', aliases: ['bre-b', 'breb'] },
+];
+
+function tenantPaymentMethods(tenant) {
+  const configured = Array.isArray(tenant.config?.orderPolicy?.paymentMethods)
+    ? tenant.config.orderPolicy.paymentMethods
+    : [];
+  const configuredById = new Map(configured.filter((method) => method?.id).map((method) => [method.id, method]));
+  const core = defaultPaymentMethods.map((method) => ({
+    ...method,
+    ...configuredById.get(method.id),
+    id: method.id,
+    label: configuredById.get(method.id)?.label || method.label,
+    aliases: Array.from(new Set([...(method.aliases ?? []), ...(configuredById.get(method.id)?.aliases ?? [])])),
+    enabled: true,
+    required: true,
+  }));
+  const custom = configured.filter((method) => method?.id && !defaultPaymentMethods.some((coreMethod) => coreMethod.id === method.id));
+  return [...core, ...custom];
+}
+
+function paymentMethodId(label) {
+  return String(label ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
+}
+
 function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
+  const [paymentMethods, setPaymentMethods] = useState(() => tenantPaymentMethods(tenant));
+  const [paymentLabel, setPaymentLabel] = useState('');
+  const [paymentNotice, setPaymentNotice] = useState('');
+  const [savingPayments, setSavingPayments] = useState(false);
   const [llmDraft, setLlmDraft] = useState(() => ({
     phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
     phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -6144,6 +6195,9 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
     missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
   }));
   useEffect(() => {
+    setPaymentMethods(tenantPaymentMethods(tenant));
+    setPaymentLabel('');
+    setPaymentNotice('');
     setLlmDraft({
       phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
       phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -6174,11 +6228,44 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const connectedTools = toolList.filter((tool) => ['sandbox_ready', 'production_ready', 'approval_required'].includes(tool.status)).length;
   const configTabs = [
     ['store', Store, 'Tienda', 'Datos base'],
+    ['payments', CircleDollarSign, 'Cobros', `${paymentMethods.length} medios`],
     ['google', Database, 'Productos', googleStatusHint],
     ['whatsapp', MessageCircle, 'WhatsApp', llmDraft.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['agent', Bot, 'Cómo responde', 'Atención al cliente'],
     ['tools', PlugZap, 'Estado técnico', `${connectedTools}/${toolList.length}`],
   ];
+  const addPaymentMethod = () => {
+    const label = paymentLabel.trim();
+    const id = paymentMethodId(label);
+    if (!id) {
+      setPaymentNotice('Escribe el nombre del medio de pago que aceptas.');
+      return;
+    }
+    if (paymentMethods.some((method) => method.id === id || method.label.toLocaleLowerCase('es-CO') === label.toLocaleLowerCase('es-CO'))) {
+      setPaymentNotice('Ese medio de pago ya está disponible.');
+      return;
+    }
+    setPaymentMethods((current) => [...current, { id, label, aliases: [label], enabled: true }]);
+    setPaymentLabel('');
+    setPaymentNotice(`${label} se agregará cuando guardes los cambios.`);
+  };
+  const removePaymentMethod = (id) => {
+    if (defaultPaymentMethods.some((method) => method.id === id)) return;
+    setPaymentMethods((current) => current.filter((method) => method.id !== id));
+    setPaymentNotice('El cambio se aplicará cuando guardes los medios de pago.');
+  };
+  const savePaymentMethods = async () => {
+    setSavingPayments(true);
+    setPaymentNotice('');
+    try {
+      await onSaveConfig({ orderPolicy: { paymentMethods } });
+      setPaymentNotice('Medios de pago guardados para esta tienda.');
+    } catch {
+      setPaymentNotice('No se pudieron guardar los medios de pago. Inténtalo nuevamente.');
+    } finally {
+      setSavingPayments(false);
+    }
+  };
   return (
     <section className="config-layout">
       <div className="section-title split-title config-titlebar">
@@ -6230,6 +6317,57 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
             <span>Los secretos se guardan como referencias por cliente; la app no muestra valores planos.</span>
           </div>
           </details>
+        </article>
+        )}
+        {activeConfigTab === 'payments' && (
+        <article className="settings-panel config-focus-panel">
+          <div className="config-panel-heading">
+            <div>
+              <span className="eyebrow">Cobro al cliente</span>
+              <h3>Medios de pago de tu tienda</h3>
+            </div>
+            <span className="status-chip is-live">{paymentMethods.length} disponibles</span>
+          </div>
+          <p>El asistente mostrará el total del pedido y pedirá uno de estos medios antes de confirmarlo.</p>
+          <div className="payment-method-list" aria-label="Medios de pago disponibles">
+            {paymentMethods.map((method) => {
+              const isCore = defaultPaymentMethods.some((coreMethod) => coreMethod.id === method.id);
+              return (
+                <div className="payment-method-row" key={method.id}>
+                  <div>
+                    <CircleDollarSign size={18} />
+                    <span>
+                      <strong>{method.label}</strong>
+                      <small>{isCore ? 'Incluido en tu tienda' : 'Medio creado por tu tienda'}</small>
+                    </span>
+                  </div>
+                  {isCore ? (
+                    <span className="payment-method-fixed">Activo</span>
+                  ) : (
+                    <button aria-label={`Quitar ${method.label}`} className="icon-btn danger-icon-btn" title={`Quitar ${method.label}`} type="button" onClick={() => removePaymentMethod(method.id)}>
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div className="payment-method-add">
+            <label className="config-field">
+              <span><CircleDollarSign size={16} /> Nuevo medio de pago</span>
+              <input value={paymentLabel} onChange={(event) => setPaymentLabel(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addPaymentMethod(); } }} placeholder="Ej. Nequi" />
+            </label>
+            <button className="ghost-btn" type="button" onClick={addPaymentMethod}>Agregar</button>
+          </div>
+          {paymentNotice && <p className="config-inline-notice" role="status">{paymentNotice}</p>}
+          <div className="isolation-note">
+            <ShieldCheck size={18} />
+            <span>Esta lista es independiente para cada tienda y no modifica los medios de pago de otros clientes.</span>
+          </div>
+          <button className="approve-btn" disabled={savingPayments} type="button" onClick={savePaymentMethods}>
+            <Check size={16} />
+            {savingPayments ? 'Guardando…' : 'Guardar medios de pago'}
+          </button>
         </article>
         )}
         {activeConfigTab === 'google' && (

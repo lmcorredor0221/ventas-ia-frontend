@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, Check, Clock3, Store, UserCheck } from 'lucide-react';
+import { AlertTriangle, Check, CircleDollarSign, Clock3, Store, UserCheck } from 'lucide-react';
 import { ORDER_STAGE_LABELS, orderStageIndex, orderStatusLabel } from '../../domain/orders/status.js';
 
 export default function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, busy, selected }) {
@@ -31,6 +31,7 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
       </div>
       <div className="delivery-destination">
         <InfoLine icon={Store} label="Entrega" value={order.deliveryAddress || 'Dirección pendiente'} />
+        {order.paymentMethodLabel && <InfoLine icon={CircleDollarSign} label="Pago" value={order.paymentMethodLabel} />}
         <InfoLine icon={UserCheck} label="Responsable" value="Tu tienda" />
       </div>
       {order.sheetSyncStatus === 'pending' && <p className="order-sync-note"><AlertTriangle size={15} aria-hidden="true" /> El cambio quedó guardado aquí, pero la hoja de Google no estaba conectada. Revísala al reconectar.</p>}
