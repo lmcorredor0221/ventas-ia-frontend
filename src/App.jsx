@@ -947,6 +947,7 @@ function App() {
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
+      pilot: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/connect`,
     };
     setOnboardingBusy(`whatsapp-${action}`);
     try {
@@ -4084,6 +4085,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const [registrationPin, setRegistrationPin] = useState('');
   const currentPath = onboarding.setupPath;
   const connected = onboarding.status === 'connected';
+  const testPilot = onboarding.testPilot ?? {};
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
   const platformBlock = onboarding.reason === 'meta_app_review_pending'
@@ -4177,6 +4179,39 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <ShieldCheck size={18} />
               <p>No tendrás que buscar identificadores, tokens, enlaces de webhook ni códigos técnicos en Meta.</p>
             </div>
+            {isPlatformAdmin && (
+              <div className="whatsapp-test-pilot">
+                <span className="eyebrow">Piloto de evidencia Meta</span>
+                <h4>Conecta el número de prueba de la plataforma</h4>
+                <p>
+                  Este acceso sirve solo para comprobar Ventas IA ante Meta. El número queda limitado a esta
+                  tienda piloto y nunca se comparte con clientes ni con otras tiendas.
+                </p>
+                {testPilot.eligible ? (
+                  testPilot.configured ? (
+                    <button
+                      className="approve-btn compact"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => onAction('pilot')}
+                      type="button"
+                    >
+                      <PlugZap size={15} />
+                      {busyAction === 'whatsapp-pilot' ? 'Conectando número de prueba...' : 'Conectar número de prueba'}
+                    </button>
+                  ) : (
+                    <p className="whatsapp-test-pilot-note">
+                      Falta cargar de forma segura los datos del número de prueba en Render. No uses un número
+                      ni una credencial de un cliente.
+                    </p>
+                  )
+                ) : (
+                  <p className="whatsapp-test-pilot-note">
+                    Para proteger a los clientes, primero designa esta tienda como piloto en Render. Su
+                    identificador interno es <code>{tenant.id}</code>.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="whatsapp-pending-actions">
               <button className="approve-btn" type="button" onClick={() => onSelectOnboardingTab('google')}>
                 <Database size={16} />

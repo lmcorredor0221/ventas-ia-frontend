@@ -4904,6 +4904,44 @@ select:disabled {
   line-height: 1.38;
 }
 
+.whatsapp-test-pilot {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed rgba(23, 50, 77, 0.25);
+  border-radius: 7px;
+  background: rgba(23, 50, 77, 0.04);
+}
+
+.whatsapp-test-pilot h4,
+.whatsapp-test-pilot p {
+  margin: 0;
+}
+
+.whatsapp-test-pilot h4 {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.whatsapp-test-pilot p {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.whatsapp-test-pilot .approve-btn {
+  justify-self: start;
+}
+
+.whatsapp-test-pilot-note {
+  padding-top: 2px;
+}
+
+.whatsapp-test-pilot code {
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
 .whatsapp-pin-field {
   display: grid;
   gap: 7px;
