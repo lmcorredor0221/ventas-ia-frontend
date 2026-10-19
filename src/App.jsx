@@ -1072,11 +1072,19 @@ function App() {
       const result = await patchJson(`/api/orders/${encodeURIComponent(orderId)}/status`, { status }, { headers: csrfHeaders(auth) });
       setOrders((current) => current.map((order) => order.id === orderId ? result : order));
       if (status === 'delivered') setQueueFocus('finished');
-      setQueueNotice({ type: 'success', text: {
+      const notice = {
         preparing: 'Pedido tomado. Ya puedes alistarlo.',
         dispatched: 'Pedido marcado en camino.',
         delivered: 'Pedido marcado como entregado.',
-      }[status] });
+      }[status];
+      const notification = result.transition?.notification;
+      if (status === 'dispatched' && notification?.status === 'sent') {
+        setQueueNotice({ type: 'success', text: `${notice} Avisamos al cliente por WhatsApp y cerramos la conversación.` });
+      } else if (status === 'dispatched' && notification?.status === 'failed') {
+        setQueueNotice({ type: 'error', text: `${notice} pero WhatsApp no pudo entregar el aviso. Renueva el token de Meta y vuelve a intentarlo.` });
+      } else {
+        setQueueNotice({ type: 'success', text: notice });
+      }
       setRefreshKey((value) => value + 1);
     } catch (error) {
       setQueueNotice({ type: 'error', text: error.message });
