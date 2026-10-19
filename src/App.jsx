@@ -871,7 +871,7 @@ function App() {
       return;
     }
     const postRoutes = {
-      subscription: `/api/saas/tenants/${encodeURIComponent(tenantId)}/subscription/mock-activate`,
+      subscription: `/api/saas/tenants/${encodeURIComponent(tenantId)}/subscription/start-trial`,
       'billing-checkout': '/api/billing/checkout',
       'billing-continue': '/api/billing/continue-checkout',
       'billing-cancel': '/api/billing/cancel',
@@ -882,7 +882,7 @@ function App() {
     setOnboardingBusy(action);
     try {
       if (action === 'google-oauth') {
-        window.location.assign(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start?redirect=1`);
+        window.location.assign(`/api/saas/connect/google/${encodeURIComponent(tenantId)}/start?redirect=1`);
         return;
       } else {
         if (!postRoutes[action]) throw new Error(`Acción no configurada: ${action}`);
@@ -3417,6 +3417,14 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const workspace = bundle?.googleWorkspace;
   const googleConnection = bundle?.googleConnection;
   const subscription = status.subscription ?? bundle?.subscription;
+  const setupAccess = status.setupAccess ?? {
+    allowed: ['active', 'authorized', 'trial', 'grace_period'].includes(subscription?.status),
+    source: 'subscription',
+    expiresAt: null,
+  };
+  const subscriptionLabel = setupAccess.source === 'billing_access_exception'
+    ? 'Acceso temporal de piloto'
+    : humanState(subscription?.status) ?? 'Por validar';
   const currentStep = enrichedSteps.find((item) => item.key === guidedNextStep) ?? enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
   const currentMeta = currentStep?.meta ?? onboardingStepMeta(guidedNextStep);
   const CurrentIcon = currentMeta.icon;
@@ -3441,8 +3449,8 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
     {
       icon: CircleDollarSign,
       label: 'Suscripción',
-      value: humanState(subscription?.status) ?? 'Por validar',
-      state: subscription?.status === 'active' || subscription?.status === 'authorized' ? 'ok' : 'warn',
+      value: subscriptionLabel,
+      state: setupAccess.allowed ? 'ok' : 'warn',
     },
     {
       icon: UserCheck,
@@ -3459,7 +3467,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   ];
   const onboardingTabs = [
     ['route', ShieldCheck, 'Ruta', `${completeCount}/${checks.length}`],
-    ['billing', CircleDollarSign, 'Pago', humanState(subscription?.status) ?? 'Pendiente'],
+    ['billing', CircleDollarSign, 'Pago', subscriptionLabel],
     ['google', Database, 'Google', googleConnection?.accountEmail ? 'Conectado' : 'Pendiente'],
     ['whatsapp', MessageCircle, 'WhatsApp', tenant.config?.whatsapp?.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['test', Play, 'Prueba', status.readyForOperation ? 'Lista' : 'Pendiente'],
@@ -3475,11 +3483,11 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       title: 'Conectar tu cuenta Google',
       detail: 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
       done: googleConnected,
-      status: googleConnected ? 'sandbox_ready' : 'needs_binding',
-      statusText: googleConnected ? 'Cuenta conectada' : 'Pendiente',
+      status: googleConnected ? 'sandbox_ready' : setupAccess.allowed ? 'needs_binding' : 'approval_required',
+      statusText: googleConnected ? 'Cuenta conectada' : setupAccess.allowed ? 'Pendiente' : 'Inicia tu prueba primero',
       action: 'google-oauth',
       actionLabel: googleConnected ? 'Reconectar Google' : 'Conectar Google',
-      disabled: false,
+      disabled: !setupAccess.allowed,
     },
     {
       key: 'provision',
@@ -3908,6 +3916,9 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
   const canContinue = billing?.actions?.canContinueCheckout;
   const canStart = billing?.actions?.canStartCheckout;
   const status = activeSubscription?.status ?? 'pending_payment';
+  const canStartTrial = status === 'pending_payment'
+    && Boolean(plan?.trialEnabled && Number(plan?.trialDays) > 0)
+    && !activeSubscription?.trialStartedAt;
   const nextDate = activeSubscription?.nextBillingDate ?? activeSubscription?.currentPeriodEnd;
   const notices = billing?.notices ?? [];
   const paymentHistory = billing?.paymentHistory ?? payments;
@@ -3940,7 +3951,12 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
         </div>
       )}
       <div className="billing-owner-actions">
-        {canContinue ? (
+        {canStartTrial ? (
+          <button className="approve-btn compact" type="button" onClick={() => onAction('subscription')} disabled={Boolean(busyAction)}>
+            <CircleDollarSign size={16} />
+            Iniciar prueba de {plan.trialDays} días
+          </button>
+        ) : canContinue ? (
           <button className="approve-btn compact" type="button" onClick={() => onAction('billing-continue')} disabled={Boolean(busyAction)}>
             <CircleDollarSign size={16} />
             Continuar pago
@@ -4010,7 +4026,7 @@ function OnboardingStep({ busyAction, check, index, isCurrent, isPlatformAdmin, 
       ) : (
         <button className="ghost-btn compact" type="button" onClick={() => onAction(action.key)} disabled={busyAction === action.key}>
           {action.icon}
-          {busyAction === action.key ? 'Un momento…' : check.key === 'subscription' && !isPlatformAdmin ? 'Ver pago' : action.label}
+          {busyAction === action.key ? 'Un momento…' : action.label}
         </button>
       )}
     </article>
@@ -4362,7 +4378,7 @@ function onboardingStepMeta(key) {
 
 function onboardingStepAction(key) {
   const action = {
-    subscription: { key: 'subscription', label: 'Activar prueba local', icon: <CircleDollarSign size={15} /> },
+    subscription: { key: 'subscription', label: 'Iniciar prueba de 7 días', icon: <CircleDollarSign size={15} /> },
     google_oauth: { key: 'google-oauth', label: 'Conectar Google', icon: <UserCheck size={15} /> },
     google_provisioning: { key: 'provision', label: 'Provisionar', icon: <Database size={15} /> },
     llm: { key: 'config-llm', label: 'Configurar', icon: <Bot size={15} /> },
@@ -4406,15 +4422,15 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
   }
   if (status.nextStep === 'subscription' && !isPlatformAdmin) {
     return {
-      action: 'open-billing',
-      label: 'Ver cómo activar mi plan',
-      title: 'Activa tu plan para comenzar',
-      detail: 'Consulta el precio y sigue el pago seguro de tu suscripción. La demostración gratuita de la página no activa el servicio.',
+      action: 'subscription',
+      label: 'Iniciar prueba de 7 días',
+      title: 'Empieza tu prueba gratuita',
+      detail: 'Tendrás 7 días para conectar Google, cargar productos y conocer la plataforma. Al terminar, te pediremos activar tu plan.',
     };
   }
   const stepAction = onboardingStepAction(status.nextStep);
   const titles = {
-    subscription: ['Validar suscripción', 'El acceso depende del pago mensual de la plataforma en Mercado Pago.'],
+    subscription: ['Empieza tu prueba gratuita', 'Tendrás 7 días para dejar lista la tienda antes de activar tu plan mensual.'],
     google_oauth: ['Conectar tu cuenta Google', 'Con tu permiso, la tienda podrá consultar productos y guardar pedidos en tus archivos.'],
     google_provisioning: ['Crear la hoja de tu tienda', 'Aquí estarán tus productos, clientes y pedidos.'],
     llm: ['Revisar Motor IA de la plataforma', 'El motor se administra desde Centro de control y se consume transversalmente.'],
