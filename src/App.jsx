@@ -47,6 +47,7 @@ import {
   Sparkles,
   Store,
   Truck,
+  Trash2,
   UserCheck,
   Users,
   X,
@@ -776,6 +777,32 @@ function App() {
     }
   }
 
+  async function deleteConversation(id) {
+    const conversation = conversationList.find((item) => item.id === id);
+    if (!conversation || backendStatus !== 'connected') return;
+    const confirmed = window.confirm(`Eliminar la conversación de ${conversation.customer ?? conversation.waId}? Esta acción quita también las tareas pendientes asociadas y no se puede deshacer.`);
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: csrfHeaders(auth),
+        credentials: 'include',
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? `No se pudo eliminar la conversación (${response.status}).`);
+      setConversationList((current) => current.filter((item) => item.id !== id));
+      setRequests((current) => current.filter((request) => request.conversationId !== id));
+      setSelectedId((current) => current === id ? '' : current);
+      setConversationWorkspaceTab('list');
+      setMobileConversationOpen(false);
+      setBackendStatus('connected');
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setBackendStatus((current) => (current === 'offline' ? current : 'connected'));
+      setQueueNotice({ tone: 'error', text: error.message });
+    }
+  }
+
   useEffect(() => {
     if (activeView !== 'conversations') return undefined;
     function handleConversationKeys(event) {
@@ -1312,6 +1339,7 @@ function App() {
             detailCollapsed={conversationDetailCollapsed}
             events={visibleEvents}
             onSelectConversation={openWhatsAppConversation}
+            onDeleteConversation={deleteConversation}
             onOpenWhatsAppExternally={markManualWhatsApp}
             onOpenApprovals={openApprovals}
             onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
@@ -2738,6 +2766,7 @@ function ConversationsView({
   detailCollapsed,
   events,
   onOpenApprovals,
+  onDeleteConversation,
   onOpenWhatsAppExternally,
   onSelectConversation,
   onToggleDetail,
@@ -2875,6 +2904,7 @@ function ConversationsView({
             events={events}
             onBack={returnToList}
             onOpenApprovals={() => onOpenApprovals?.(pendingRequest?.id ?? '')}
+            onDeleteConversation={onDeleteConversation}
             onToggleDetail={onToggleDetail}
             pendingRequest={pendingRequest}
             onOpenWhatsAppExternally={onOpenWhatsAppExternally}
@@ -2902,6 +2932,7 @@ function ConversationPanel({
   events,
   onBack,
   onClose,
+  onDeleteConversation,
   onOpenApprovals,
   onOpenWhatsAppExternally,
   onOpenList,
@@ -3015,6 +3046,12 @@ function ConversationPanel({
             <button className="ghost-btn compact" type="button" onClick={onOpenList}>
               <MessageSquareText size={16} />
               Lista de chats
+            </button>
+          )}
+          {!conversation.orderId && onDeleteConversation && (
+            <button className="ghost-btn compact danger-btn" type="button" onClick={() => onDeleteConversation(conversation.id)}>
+              <Trash2 size={16} />
+              Eliminar conversación
             </button>
           )}
         </div>
