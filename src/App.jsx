@@ -585,7 +585,9 @@ function App() {
           setAuthStatus('signed_in');
           setAuthRequired(false);
           setAuthError('');
-          if (session.memberships?.[0]?.tenantId) setTenantId(session.memberships[0].tenantId);
+          if (!canAccessPlatformAdmin(session) && session.memberships?.[0]?.tenantId) {
+            setTenantId(session.memberships[0].tenantId);
+          }
         }
       } catch {
         if (!cancelled) setAuthStatus('guest');
