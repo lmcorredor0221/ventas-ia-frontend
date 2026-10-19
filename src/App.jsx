@@ -3086,6 +3086,7 @@ function ConversationPanel({
         <InfoLine icon={ShoppingBag} label="Valor / etapa" value={`${conversation.value} · ${stageLabel(conversation.stage)}`} />
         <InfoLine icon={PlugZap} label="Herramienta" value={toolLabel(conversation.lastTool)} />
         {conversation.aiExecution?.mode && <InfoLine icon={Bot} label="Interpretación" value={llmExecutionLabel(conversation.aiExecution.mode)} />}
+        {conversation.customerCapture?.capturedAt && <InfoLine icon={UserCheck} label="Datos del cliente" value={customerCaptureLabel(conversation.customerCapture)} />}
       </div>
 
       {pendingRequest && (
@@ -3160,6 +3161,17 @@ function llmExecutionLabel(mode) {
     provider_unavailable_handoff: 'LLM no disponible: relevo humano',
   };
   return labels[mode] ?? mode;
+}
+
+function customerCaptureLabel(capture) {
+  const fields = [capture?.nameSource && 'Nombre', capture?.addressSource && 'Dirección'].filter(Boolean);
+  const sources = new Set([capture?.nameSource, capture?.addressSource].filter(Boolean));
+  const source = sources.size > 1
+    ? 'registrados desde el mensaje y la IA'
+    : sources.has('llm')
+      ? 'interpretados por IA'
+      : 'recibidos del mensaje';
+  return `${fields.join(' y ') || 'Datos'} ${source}`;
 }
 
 function InfoLine({ icon: Icon, label, value }) {
