@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
+import { patchJson, postJson } from './core/api/client.js';
+import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
+import OrderProgressCard from './features/orders/OrderProgressCard.jsx';
 import {
   Activity,
   AlertTriangle,
@@ -635,7 +638,7 @@ function App() {
           return;
         }
         if (!response.ok) throw new Error(`Backend ${response.status}`);
-        const overview = await response.json();
+        const overview = normalizeOpsOverview(await response.json());
         if (cancelled) return;
         setTenantList(overview.tenants?.length ? overview.tenants : tenants);
         setToolList(overview.tools ?? []);
@@ -1014,19 +1017,13 @@ function App() {
     setQueueNotice(null);
     try {
       if (backendStatus !== 'connected') throw new Error('offline');
-      const resolution = await fetch(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
-        credentials: 'include',
-        body: JSON.stringify({ outcome, note, responseMode, approverId: auth?.user?.id ?? 'micro-app-user' }),
-      });
-      if (!resolution.ok) throw new Error(`resolution-${resolution.status}`);
+      await postJson(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, { outcome, note, responseMode, approverId: auth?.user?.id ?? 'micro-app-user' }, { headers: csrfHeaders(auth) });
       if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
       setRequests((current) => current.filter((item) => item.id !== id));
       setQueueNotice({ type: 'success', text: outcome === 'approved' ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.' : 'Decisión guardada. La lista se actualizará enseguida.' });
       setRefreshKey((value) => value + 1);
-    } catch {
-      setQueueNotice({ type: 'error', text: 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.' });
+    } catch (error) {
+      setQueueNotice({ type: 'error', text: normalizeApiErrorMessage(error, 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.') });
       setRefreshKey((value) => value + 1);
     } finally {
       setResolvingRequestId('');
@@ -1037,14 +1034,7 @@ function App() {
     setUpdatingOrderId(orderId);
     setQueueNotice(null);
     try {
-      const response = await fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
-        credentials: 'include',
-        body: JSON.stringify({ status }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? 'No pudimos guardar el estado del pedido.');
+      const result = await patchJson(`/api/orders/${encodeURIComponent(orderId)}/status`, { status }, { headers: csrfHeaders(auth) });
       setOrders((current) => current.map((order) => order.id === orderId ? result : order));
       if (status === 'delivered') setQueueFocus('finished');
       setQueueNotice({ type: 'success', text: {
@@ -3377,50 +3367,6 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
   );
 }
 
-function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, busy, selected }) {
-  const stageIndex = { preparing: 1, dispatched: 2, delivered: 3 }[order.status] ?? 0;
-  const stageLabels = ['Confirmado', 'Alistando', 'En camino', 'Entregado'];
-  const statusLabel = { pending_human_preparation: 'Pedido por tomar', preparing: 'Alistando pedido', dispatched: 'Pedido en camino', delivered: 'Pedido entregado', cancelled: 'Pedido cancelado' }[order.status] ?? 'Pedido confirmado';
-  return (
-    <article className={`request-card order-progress-card ${selected ? 'is-selected' : ''}`} data-order-id={order.id} tabIndex={selected ? -1 : undefined}>
-      <div className="request-top">
-        <span className={`order-status-chip is-${order.status}`}>{statusLabel}</span>
-        <span className="request-kind">{formatDateShort(order.updatedAt ?? order.createdAt)}</span>
-      </div>
-      <h3>{order.customerName || 'Cliente'} · {formatCurrency(order.subtotal)}</h3>
-      <p className="order-progress-reference">Pedido {order.id}</p>
-      {order.status === 'cancelled' ? (
-        <p className="order-cancelled-note">Este pedido no se pudo alistar. Conservamos el registro para que puedas revisarlo.</p>
-      ) : (
-        <ol className="order-journey" aria-label="Estado del pedido">
-          {stageLabels.map((label, index) => (
-            <li className={index < stageIndex ? 'is-done' : index === stageIndex ? 'is-current' : ''} key={label}>
-              {index <= stageIndex ? <Check size={13} aria-hidden="true" /> : <Clock3 size={13} aria-hidden="true" />}{label}
-            </li>
-          ))}
-        </ol>
-      )}
-      <div className="delivery-items">
-        {(order.items ?? []).slice(0, 5).map((item, index) => (
-          <div key={`${item.name}-${index}`}><strong>{item.quantity ?? 1}x</strong><span>{item.name ?? item.catalogQuery ?? 'Producto'}</span></div>
-        ))}
-        {(order.items ?? []).length > 5 && <em>+ {(order.items ?? []).length - 5} productos más</em>}
-      </div>
-      <div className="delivery-destination">
-        <InfoLine icon={Store} label="Entrega" value={order.deliveryAddress || 'Dirección pendiente'} />
-        <InfoLine icon={UserCheck} label="Responsable" value="Tu tienda" />
-      </div>
-      {order.sheetSyncStatus === 'pending' && <p className="order-sync-note"><AlertTriangle size={15} aria-hidden="true" /> El cambio quedó guardado aquí, pero la hoja de Google no estaba conectada. Revísala al reconectar.</p>}
-      <div className="order-progress-actions">
-        {order.status === 'pending_human_preparation' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'preparing')}>{busy ? 'Guardando…' : 'Marcar tomado'}</button>}
-        {order.status === 'preparing' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'dispatched')}>{busy ? 'Guardando…' : 'Marcar en camino'}</button>}
-        {order.status === 'dispatched' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'delivered')}>{busy ? 'Guardando…' : 'Marcar entregado'}</button>}
-        {conversationAvailable && <button className="text-btn" type="button" onClick={() => onSelectConversation(order.conversationId)}>Abrir conversación</button>}
-      </div>
-    </article>
-  );
-}
-
 function onboardingTabForStep(step) {
   if (['subscription', 'billing-checkout', 'billing-continue', 'billing-cancel'].includes(step)) return 'billing';
   if (['google_oauth', 'google_provisioning', 'provision'].includes(step)) return 'google';
@@ -3434,12 +3380,19 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(guidedNextStep));
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
-  const next = nextOnboardingAction({ ...status, nextStep: guidedNextStep }, isPlatformAdmin);
+  const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
+  const next = guidedNextStep === 'whatsapp' && whatsappOnboarding.reason === 'meta_app_review_pending'
+    ? {
+      action: null,
+      label: 'Esperando revisión de Meta',
+      title: 'Ventas IA está terminando la conexión con Meta',
+      detail: 'El negocio de Ventas IA ya está verificado. Meta revisa los permisos para conectar el WhatsApp de las tiendas. No falta ninguna credencial de tu tienda.',
+    }
+    : nextOnboardingAction({ ...status, nextStep: guidedNextStep }, isPlatformAdmin);
   const completeCount = checks.filter((item) => item.ok).length;
   const progress = Math.round((completeCount / Math.max(checks.length, 1)) * 100);
   const workspace = bundle?.googleWorkspace;
   const googleConnection = bundle?.googleConnection;
-  const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
   const subscription = status.subscription ?? bundle?.subscription;
   const currentStep = enrichedSteps.find((item) => item.key === guidedNextStep) ?? enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
   const currentMeta = currentStep?.meta ?? onboardingStepMeta(guidedNextStep);
@@ -4094,15 +4047,25 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const connected = onboarding.status === 'connected';
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
-  const platformBlock = onboarding.reason === 'meta_webhook_not_configured'
+  const platformBlock = onboarding.reason === 'meta_app_review_pending'
     ? {
-      title: 'Estamos terminando de habilitar el canal de mensajes',
-      detail: 'Tu tienda ya eligió cómo conectarse. Falta activar una vez el receptor seguro de mensajes de Meta para toda la plataforma. No debes copiar datos ni hacer nada en Meta todavía.',
+      title: 'Meta está revisando los permisos de Ventas IA',
+      detail: 'La verificación del negocio de Ventas IA ya fue aprobada. Falta que Meta apruebe el acceso para conectar las tiendas de nuestros clientes. Este paso es de la plataforma; no tienes que registrar ni verificar tu empresa ahora.',
     }
-    : {
-      title: 'Meta aún no está habilitado en Ventas IA',
-      detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
-    };
+    : onboarding.reason === 'status_unavailable'
+      ? {
+        title: 'No pudimos comprobar el estado de Meta',
+        detail: 'Vuelve a comprobar el progreso cuando se restablezca la conexión con Ventas IA. Por ahora no ingreses datos técnicos.',
+      }
+    : onboarding.reason === 'meta_webhook_not_configured'
+      ? {
+        title: 'Estamos terminando de habilitar el canal de mensajes',
+        detail: 'Tu tienda ya eligió cómo conectarse. Falta activar una vez el receptor seguro de mensajes de Meta para toda la plataforma. No debes copiar datos ni hacer nada en Meta todavía.',
+      }
+      : {
+        title: 'Meta aún no está habilitado en Ventas IA',
+        detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
+      };
   const platformPending = !connected && !onboarding.canAutomate;
   const connectionChecklist = [
     {
@@ -4158,7 +4121,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         {platformPending ? (
           <div className="whatsapp-pending-guide">
             <span className="eyebrow">Prepárate para conectar tu número</span>
-            <h4>Cuando se active el botón, esto es lo único que necesitarás.</h4>
+            <h4>Cuando Ventas IA habilite el botón, esto es lo único que necesitarás.</h4>
             <p>
               La conexión se abrirá desde esta misma pantalla. Meta te llevará paso a paso y Ventas IA guardará
               la conexión de forma segura para tu tienda.
@@ -4249,8 +4212,8 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-unavailable">
               <AlertTriangle size={20} />
               <div>
-                <strong>{isPlatformAdmin ? platformBlock.title : 'La conexión con Meta aún no está disponible'}</strong>
-                <p>{isPlatformAdmin ? platformBlock.detail : 'Ya puedes preparar tu acceso a Meta, el celular con el número y el nombre de tu tienda. El botón “Conectar con Meta” aparecerá aquí cuando la plataforma termine su activación general.'}</p>
+                <strong>{platformBlock.title}</strong>
+                <p>{platformBlock.detail} Cuando Meta termine este paso, aquí aparecerá “Conectar con Meta”. El número se ingresará en la ventana segura de Meta.</p>
                 {isPlatformAdmin && (
                   <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
                     <Settings2 size={15} />
@@ -4301,6 +4264,7 @@ function fallbackWhatsAppOnboarding(tenant) {
     status: phoneNumberId ? 'connected' : 'needs_path',
     automationMode: 'guided_manual',
     canAutomate: false,
+    reason: 'status_unavailable',
     nextAction: phoneNumberId ? 'validate' : 'choose_setup_path',
     binding: {
       phoneNumberId,
