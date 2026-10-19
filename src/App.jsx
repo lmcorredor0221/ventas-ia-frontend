@@ -3153,6 +3153,9 @@ function formatMessageTime(value) {
 function llmExecutionLabel(mode) {
   const labels = {
     provider_api: 'LLM de producción',
+    codex_simulated_deepseek: 'Simulación de IA',
+    codex_cli_simulated_deepseek: 'Simulación de IA',
+    mock_structured: 'Simulación estructurada',
     mock_structured_fallback: 'Simulación estructurada',
     provider_unavailable_handoff: 'LLM no disponible: relevo humano',
   };
