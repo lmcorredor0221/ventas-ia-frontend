@@ -38,6 +38,7 @@ import {
   Pause,
   Play,
   PlugZap,
+  RefreshCw,
   RotateCcw,
   Search,
   Send,
@@ -977,6 +978,7 @@ function App() {
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
       pilot: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/connect`,
+      'pilot-refresh': `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/refresh`,
     };
     setOnboardingBusy(`whatsapp-${action}`);
     try {
@@ -4285,6 +4287,20 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <div>
                 <strong>WhatsApp conectado</strong>
                 <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
+                {isPlatformAdmin && testPilot.eligible && testPilot.configured && (
+                  <div className="whatsapp-pilot-refresh">
+                    <p>Canal de evidencia de Meta. Si Meta rechaza un envío por token vencido, actualiza el token seguro en Render y renuévalo aquí.</p>
+                    <button
+                      className="ghost-btn compact"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => onAction('pilot-refresh')}
+                      type="button"
+                    >
+                      <RefreshCw size={15} />
+                      {busyAction === 'whatsapp-pilot-refresh' ? 'Validando token de prueba...' : 'Renovar token de prueba'}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ) : onboarding.canAutomate ? (
