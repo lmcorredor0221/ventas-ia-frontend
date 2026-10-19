@@ -1544,9 +1544,9 @@ function LegalPage({ document }) {
         {isPrivacy ? <PrivacyNotice /> : isDeletion ? <DataDeletionNotice /> : <TermsNotice />}
         <div className="legal-callout">
           <ShieldCheck size={20} />
-          <p>Antes de la publicación comercial definitiva, este aviso debe ser revisado y completado con la razón social, canal de soporte y datos de contacto oficiales del operador de la plataforma.</p>
+          <p>Operador: Centro de Innovación Visual SAS. Solicitudes sobre privacidad y eliminación de datos: <a href="mailto:lmcorredor@gmail.com">lmcorredor@gmail.com</a>.</p>
         </div>
-        <p className="legal-updated">Última actualización: 16 de octubre de 2026.</p>
+        <p className="legal-updated">Última actualización: 19 de octubre de 2026.</p>
       </article>
     </main>
   );
@@ -1568,7 +1568,7 @@ function DataDeletionNotice() {
   return (
     <div className="legal-copy">
       <section><h2>Solicitudes de clientes de una tienda</h2><p>Si escribiste por WhatsApp a una tienda que usa Ventas IA y quieres que se eliminen tus datos de atención, escríbele a esa misma tienda por su canal oficial. La tienda es quien decide sobre su catálogo, pedidos y relación con sus clientes; confirmará la solicitud con su dueño y la enviará al soporte de la plataforma cuando corresponda.</p></section>
-      <section><h2>Solicitudes de dueños de tienda</h2><p>Ingresa a la consola con la cuenta propietaria. Antes de solicitar eliminación, descarga o conserva los pedidos y registros que necesites por obligaciones comerciales. Puedes desconectar Google y WhatsApp desde Onboarding; la solicitud de eliminación de la información administrada por la plataforma se atiende por el canal de soporte indicado en tu suscripción.</p></section>
+      <section><h2>Solicitudes de dueños de tienda</h2><p>Ingresa a la consola con la cuenta propietaria. Antes de solicitar eliminación, descarga o conserva los pedidos y registros que necesites por obligaciones comerciales. Puedes desconectar Google y WhatsApp desde Onboarding y solicitar la eliminación de la información administrada por la plataforma escribiendo a <a href="mailto:lmcorredor@gmail.com">lmcorredor@gmail.com</a>.</p></section>
       <section><h2>Qué se elimina</h2><p>La solicitud puede incluir los datos de contacto, conversaciones operativas, configuraciones y secretos de integración almacenados para esa tienda. No se eliminan de inmediato los registros que una tienda deba conservar por razones contables, legales o de seguridad. Google, Meta/WhatsApp y Mercado Pago gestionan sus propios datos y solicitudes bajo sus respectivas políticas.</p></section>
       <section><h2>Verificación y respuesta</h2><p>Para proteger la información, se valida la identidad de quien solicita la eliminación y su relación con la tienda o la conversación. La plataforma registra el resultado de la solicitud y confirma por el mismo canal de contacto disponible.</p></section>
     </div>
@@ -3374,6 +3374,28 @@ function onboardingTabForStep(step) {
   return 'route';
 }
 
+function whatsappMetaReviewCopy(status) {
+  if (status === 'in_review') {
+    return {
+      label: 'En revisión de Meta',
+      title: 'Meta está revisando el acceso de Ventas IA',
+      detail: 'La solicitud de la plataforma ya fue enviada. Tu tienda no necesita aportar credenciales ni verificar su negocio por este trámite. Cuando Meta apruebe el acceso, podrás conectar tu número aquí.',
+    };
+  }
+  if (status === 'changes_requested') {
+    return {
+      label: 'Ajustes solicitados por Meta',
+      title: 'Ventas IA está atendiendo los cambios de Meta',
+      detail: 'Meta pidió ajustes a la solicitud de la plataforma. Tu tienda no necesita aportar credenciales por este trámite. El botón de conexión aparecerá cuando se obtenga la aprobación.',
+    };
+  }
+  return {
+    label: 'Solicitud pendiente de envío',
+    title: 'Ventas IA debe completar su solicitud a Meta',
+    detail: 'El negocio de la plataforma ya está verificado, pero la solicitud de permisos para conectar tiendas aún no se ha enviado. Es una tarea de Ventas IA, no de tu tienda. Aquí aparecerá el botón cuando puedas conectar tu número.',
+  };
+}
+
 function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
   const guidedNextStep = ownerGuidedNextStep(status, isPlatformAdmin);
@@ -3381,12 +3403,13 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
   const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
+  const metaReviewCopy = whatsappMetaReviewCopy(whatsappOnboarding.platformReadiness?.appReviewStatus);
   const next = guidedNextStep === 'whatsapp' && whatsappOnboarding.reason === 'meta_app_review_pending'
     ? {
       action: null,
-      label: 'Esperando revisión de Meta',
-      title: 'Ventas IA está terminando la conexión con Meta',
-      detail: 'El negocio de Ventas IA ya está verificado. Meta revisa los permisos para conectar el WhatsApp de las tiendas. No falta ninguna credencial de tu tienda.',
+      label: metaReviewCopy.label,
+      title: metaReviewCopy.title,
+      detail: metaReviewCopy.detail,
     }
     : nextOnboardingAction({ ...status, nextStep: guidedNextStep }, isPlatformAdmin);
   const completeCount = checks.filter((item) => item.ok).length;
@@ -4048,10 +4071,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
   const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
   const platformBlock = onboarding.reason === 'meta_app_review_pending'
-    ? {
-      title: 'Meta está revisando los permisos de Ventas IA',
-      detail: 'La verificación del negocio de Ventas IA ya fue aprobada. Falta que Meta apruebe el acceso para conectar las tiendas de nuestros clientes. Este paso es de la plataforma; no tienes que registrar ni verificar tu empresa ahora.',
-    }
+    ? whatsappMetaReviewCopy(onboarding.platformReadiness?.appReviewStatus)
     : onboarding.reason === 'status_unavailable'
       ? {
         title: 'No pudimos comprobar el estado de Meta',
