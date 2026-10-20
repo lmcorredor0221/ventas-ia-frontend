@@ -1048,6 +1048,9 @@ function App() {
   async function resolveRequest(id, outcome, options = {}) {
     const note = options.note ?? draftReply;
     const responseMode = options.responseMode ?? 'none';
+    const resolvedRequest = requests.find((request) => request.id === id);
+    const deliveryOrderId = resolvedRequest ? deliveryRequestOrderId(resolvedRequest) : '';
+    const isDeliveryOrder = Boolean(resolvedRequest && isDeliveryRequest(resolvedRequest));
     setResolvingRequestId(id);
     setQueueNotice(null);
     try {
@@ -1055,7 +1058,22 @@ function App() {
       await postJson(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, { outcome, note, responseMode, approverId: auth?.user?.id ?? 'micro-app-user' }, { headers: csrfHeaders(auth) });
       if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
       setRequests((current) => current.filter((item) => item.id !== id));
-      setQueueNotice({ type: 'success', text: outcome === 'approved' ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.' : 'Decisión guardada. La lista se actualizará enseguida.' });
+      if (isDeliveryOrder) {
+        const nextStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
+        setOrders((current) => current.map((order) => (
+          deliveryRequestMatchesOrder(resolvedRequest, order) || order.id === deliveryOrderId
+            ? { ...order, status: nextStatus, updatedAt: new Date().toISOString() }
+            : order
+        )));
+      }
+      setQueueNotice({
+        type: 'success',
+        text: isDeliveryOrder && outcome === 'approved'
+          ? 'Pedido tomado. Ahora alístalo y después marca que va en camino.'
+          : isDeliveryOrder
+            ? 'Pedido cancelado. Quedó registrado en los finalizados.'
+            : 'Decisión guardada. La lista se actualizará enseguida.',
+      });
       setRefreshKey((value) => value + 1);
     } catch (error) {
       setQueueNotice({ type: 'error', text: normalizeApiErrorMessage(error, 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.') });
@@ -3193,13 +3211,21 @@ function isDeliveryRequest(request) {
     || (request.assignedTeam === 'operaciones' && normalizeLabel(request.title).includes('pedido'));
 }
 
+function deliveryRequestOrderId(request) {
+  const snapshot = request?.contextSnapshot ?? request?.context_snapshot ?? {};
+  return snapshot.orderId ?? snapshot.order_id ?? '';
+}
+
+function deliveryRequestMatchesOrder(request, order) {
+  const orderId = deliveryRequestOrderId(request);
+  return Boolean(orderId && orderId === order.id) || request?.conversationId === order.conversationId;
+}
+
 function operationalOrders(orders, requests) {
   const pendingOrderRequests = requests.filter(isDeliveryRequest);
   return orders.filter((order) => (
     ['preparing', 'dispatched'].includes(order.status)
-    || (order.status === 'pending_human_preparation' && !pendingOrderRequests.some((request) => (
-      request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId
-    )))
+    || (order.status === 'pending_human_preparation' && !pendingOrderRequests.some((request) => deliveryRequestMatchesOrder(request, order)))
   ));
 }
 
