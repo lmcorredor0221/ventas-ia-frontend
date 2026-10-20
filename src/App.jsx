@@ -3218,14 +3218,14 @@ function deliveryRequestOrderId(request) {
 
 function deliveryRequestMatchesOrder(request, order) {
   const orderId = deliveryRequestOrderId(request);
-  return Boolean(orderId && orderId === order.id) || request?.conversationId === order.conversationId;
+  return orderId ? orderId === order.id : request?.conversationId === order.conversationId;
 }
 
 function operationalOrders(orders, requests) {
   const pendingOrderRequests = requests.filter(isDeliveryRequest);
   return orders.filter((order) => (
-    ['preparing', 'dispatched'].includes(order.status)
-    || (order.status === 'pending_human_preparation' && !pendingOrderRequests.some((request) => deliveryRequestMatchesOrder(request, order)))
+    !pendingOrderRequests.some((request) => deliveryRequestMatchesOrder(request, order))
+    && ['pending_human_preparation', 'preparing', 'dispatched'].includes(order.status)
   ));
 }
 
