@@ -1393,7 +1393,7 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration key={tenant.id} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
     </main>
   );
@@ -6192,6 +6192,12 @@ function paymentMethodId(label) {
 
 function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
+  const [agentName, setAgentName] = useState(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
+  const [agentNotice, setAgentNotice] = useState('');
+  const [savingAgent, setSavingAgent] = useState(false);
+  useEffect(() => {
+    setAgentName(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
+  }, [tenant.id, tenant.config?.agentPolicy?.displayName]);
   const [paymentMethods, setPaymentMethods] = useState(() => tenantPaymentMethods(tenant));
   const [paymentLabel, setPaymentLabel] = useState('');
   const [paymentNotice, setPaymentNotice] = useState('');
@@ -6204,7 +6210,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
     appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
     spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
     catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
-    tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
+    tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
     humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
     customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
@@ -6225,7 +6231,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
       appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
       spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
       catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
-      tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
+      tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
       humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
       customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
       ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
@@ -6283,6 +6289,24 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
       setPaymentNotice('No se pudieron guardar los medios de pago. Inténtalo nuevamente.');
     } finally {
       setSavingPayments(false);
+    }
+  };
+  const saveAgentName = async (event) => {
+    event.preventDefault();
+    const name = agentName.normalize('NFC').trim().replace(/ +/g, ' ');
+    if (!name || name.length > 60 || !/^[\p{L}\p{M}][\p{L}\p{M} .’'\-]*$/u.test(name)) {
+      setAgentNotice('Usa un nombre de hasta 60 caracteres: letras, espacios, puntos, apóstrofes o guiones.');
+      return;
+    }
+    setSavingAgent(true);
+    setAgentNotice('');
+    try {
+      await onSaveConfig({ agentPolicy: { displayName: name } });
+      setAgentNotice('Nombre guardado. Se usará en los próximos mensajes de esta tienda.');
+    } catch {
+      setAgentNotice('No se pudo guardar el nombre. Inténtalo nuevamente.');
+    } finally {
+      setSavingAgent(false);
     }
   };
   return (
@@ -6539,6 +6563,18 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
         {activeConfigTab === 'agent' && (
         <article className="settings-panel config-focus-panel">
           <h3>Cómo responde a tus clientes</h3>
+          <form onSubmit={saveAgentName}>
+            <label className="config-field">
+              <span><Bot size={16} /> Nombre del asistente</span>
+              <input value={agentName} onChange={(event) => setAgentName(event.target.value)}
+                maxLength={60} required disabled={savingAgent} aria-describedby="agent-name-help" />
+            </label>
+            <p id="agent-name-help">Se presentará como asistente virtual con este nombre. El cambio solo aplica a esta tienda.</p>
+            <button className="approve-btn" disabled={savingAgent || !agentName.trim()} type="submit">
+              <Check size={16} /> {savingAgent ? 'Guardando…' : 'Guardar nombre'}
+            </button>
+            {agentNotice && <p className="config-inline-notice" role="status">{agentNotice}</p>}
+          </form>
           <div className="isolation-note">
             <Bot size={18} />
             <span>El asistente responde en español de Colombia y te pide ayuda cuando necesita una decisión.</span>
