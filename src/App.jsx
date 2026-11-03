@@ -1,3 +1,4 @@
+import { launchMetaEmbeddedSignup } from './features/whatsapp/embeddedSignup.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
 import { patchJson, postJson } from './core/api/client.js';
@@ -412,76 +413,6 @@ function loadFacebookSdk(appId, version) {
   return window.__ventasIaFacebookSdkPromise;
 }
 
-function isTrustedMetaOrigin(origin) {
-  try {
-    const host = new URL(origin).hostname.toLowerCase();
-    return host === 'facebook.com'
-      || host.endsWith('.facebook.com')
-      || host === 'meta.com'
-      || host.endsWith('.meta.com');
-  } catch {
-    return false;
-  }
-}
-
-async function launchMetaEmbeddedSignup(launch) {
-  if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
-  const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
-  return new Promise((resolve, reject) => {
-    let loginCode = '';
-    let sessionInfo = null;
-    let settled = false;
-    const finish = () => {
-      if (settled || !loginCode || !sessionInfo?.wabaId || !sessionInfo?.phoneNumberId) return;
-      settled = true;
-      window.removeEventListener('message', onMessage);
-      resolve({ code: loginCode, ...sessionInfo });
-    };
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener('message', onMessage);
-      reject(error);
-    };
-    const onMessage = (event) => {
-      if (!isTrustedMetaOrigin(event.origin)) return;
-      let data = event.data;
-      if (typeof data === 'string') {
-        try { data = JSON.parse(data); } catch { return; }
-      }
-      if (data?.type !== 'WA_EMBEDDED_SIGNUP') return;
-      const payload = data.data ?? data;
-      const eventName = String(payload.event ?? '').toUpperCase();
-      if (eventName === 'CANCEL' || eventName === 'ERROR') {
-        fail(new Error('La autorización de WhatsApp fue cancelada o reportó un error.'));
-        return;
-      }
-      sessionInfo = {
-        wabaId: payload.waba_id ?? payload.wabaId,
-        phoneNumberId: payload.phone_number_id ?? payload.phoneNumberId,
-        displayPhoneNumber: payload.display_phone_number ?? payload.displayPhoneNumber,
-      };
-      finish();
-    };
-    window.addEventListener('message', onMessage);
-    FB.login((response) => {
-      const code = response?.authResponse?.code;
-      if (!code) {
-        fail(new Error('Meta no devolvió el código de autorización.'));
-        return;
-      }
-      loginCode = code;
-      finish();
-    }, {
-      config_id: launch.configId,
-      response_type: launch.responseType ?? 'code',
-      override_default_response_type: true,
-      extras: { sessionInfoVersion: '3' },
-    });
-    window.setTimeout(() => fail(new Error('La autorización de WhatsApp tardó demasiado.')), 180000);
-  });
-}
-
 function firstActiveTenantId(auth) {
   return auth?.memberships?.find((item) => item.status === 'active')?.tenantId ?? auth?.memberships?.[0]?.tenantId ?? '';
 }
@@ -503,6 +434,8 @@ function App() {
   const [conversationList, setConversationList] = useState(loadFixtureSize ? initialConversations : []);
   const [backendStatus, setBackendStatus] = useState('connecting');
   const [tenantId, setTenantId] = useState(() => initialRouteQuery?.get('tenant') ?? tenants[0].id);
+  const activeTenantRef = useRef(tenantId);
+  activeTenantRef.current = tenantId;
   const [activeView, setActiveView] = useState(() => initialRouteQuery?.get('view') === 'onboarding' ? 'onboarding' : 'summary');
   const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? '');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -975,9 +908,12 @@ function App() {
 
   async function runWhatsAppOnboarding(action, payload = {}) {
     setOnboardingError('');
+    let completionAttemptId = payload.attemptId;
     const routes = {
       intent: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/intent`,
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
+      renew: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/renew`,
+      sync: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/coexistence/sync`,
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
       pilot: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/connect`,
@@ -992,13 +928,16 @@ function App() {
         credentials: 'include',
         body: JSON.stringify(payload),
       });
-      const result = await response.json().catch(() => ({}));
+      let result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error ?? `WhatsApp ${response.status}`);
       if (action === 'start' && result.launch?.authorizationUrl) {
         window.open(result.launch.authorizationUrl, '_blank', 'noopener,noreferrer');
       }
-      if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
-        const signup = await launchMetaEmbeddedSignup(result.launch);
+      if (['start', 'renew'].includes(action) && result.mode === 'embedded_signup' && result.launch) {
+        const sdk = await loadFacebookSdk(result.launch.appId, result.launch.graphApiVersion ?? 'v26.0');
+        const signup = await launchMetaEmbeddedSignup(result.launch, sdk, window);
+        if (activeTenantRef.current !== tenantId) throw new Error('Cambiaste de tienda durante la autorización. Vuelve a abrir la tienda que deseas conectar.');
+        completionAttemptId = signup.attemptId;
         const completionPayload = {
           ...signup,
           registrationPin: payload.registrationPin,
@@ -1011,14 +950,16 @@ function App() {
         });
         const completion = await completionResponse.json().catch(() => ({}));
         if (!completionResponse.ok) throw new Error(completion.error ?? `WhatsApp ${completionResponse.status}`);
+        result = completion;
       }
       setRefreshKey((value) => value + 1);
       const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
-      if (statusResponse.ok) setOnboardingBundle(await statusResponse.json());
+      if (statusResponse.ok && activeTenantRef.current === tenantId) setOnboardingBundle(await statusResponse.json());
+      if (action === 'pilot-refresh') setOnboardingNotice('Meta validó el token de prueba y VIA actualizó el canal de esta tienda.');
       return result;
     } catch (error) {
       setOnboardingError(error.message);
-      return null;
+      return completionAttemptId ? { requiresCompletionRetry: true, attemptId: completionAttemptId } : null;
     } finally {
       setOnboardingBusy('');
     }
@@ -3346,7 +3287,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
           ))}
         </div>
       </div>
-      {notice && (
+      {(error || notice) && (
         <div className={`queue-notice is-${notice.type}`} role={notice.type === 'error' ? 'alert' : 'status'}>
           {notice.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
           <span>{notice.text}</span>
@@ -3560,7 +3501,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       icon: UserCheck,
       label: 'Tu cuenta Google',
       value: googleConnection?.accountEmail ?? 'Pendiente',
-      state: googleConnection?.accountEmail ? 'ok' : 'warn',
+      state: googleConnection?.status === 'connected' ? 'ok' : 'warn',
     },
     {
       icon: MessageCircle,
@@ -3572,11 +3513,11 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const onboardingTabs = [
     ['route', ShieldCheck, 'Ruta', `${completeCount}/${checks.length}`],
     ['billing', CircleDollarSign, 'Pago', subscriptionLabel],
-    ['google', Database, 'Google', googleConnection?.accountEmail ? 'Conectado' : 'Pendiente'],
+    ['google', Database, 'Google', googleConnection?.status === 'connected' ? 'Conectado' : googleConnection?.status === 'reconnect_required' ? 'Reconectar' : 'Pendiente'],
     ['whatsapp', MessageCircle, 'WhatsApp', tenant.config?.whatsapp?.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['test', Play, 'Prueba', status.readyForOperation ? 'Lista' : 'Pendiente'],
   ];
-  const googleConnected = Boolean(googleConnection?.accountEmail || googleConnection?.status === 'connected');
+  const googleConnected = googleConnection?.status === 'connected';
   const googleProvisioned = Boolean(
     workspace?.spreadsheet?.id || workspace?.status === 'provisioned' || workspace?.status === 'ready',
   );
@@ -3585,12 +3526,14 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       key: 'authorize',
       icon: UserCheck,
       title: 'Conectar tu cuenta Google',
-      detail: 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
+      detail: googleConnection?.status === 'reconnect_required'
+        ? 'La autorización de Google venció o fue revocada. Reconecta la misma cuenta; conservaremos la hoja y los datos de tu tienda.'
+        : 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
       done: googleConnected,
       status: googleConnected ? 'sandbox_ready' : setupAccess.allowed ? 'needs_binding' : 'approval_required',
       statusText: googleConnected ? 'Cuenta conectada' : setupAccess.allowed ? 'Pendiente' : 'Inicia tu prueba primero',
       action: 'google-oauth',
-      actionLabel: googleConnected ? 'Reconectar Google' : 'Conectar Google',
+      actionLabel: googleConnection?.accountEmail ? 'Reconectar Google' : 'Conectar Google',
       disabled: !setupAccess.allowed,
     },
     {
@@ -3693,7 +3636,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       {notice && (
         <div className={`setup-notice ${error ? 'is-warning' : ''}`} role="status">
           {error ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
-          <span>{notice}</span>
+          <span>{error || notice}</span>
         </div>
       )}
 
@@ -4175,7 +4118,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
     {
       key: 'business_app_existing',
       title: 'Tiene WhatsApp Business App',
-      detail: 'Guiamos migración o activación del número para responder desde la plataforma.',
+      detail: 'Conserva la app del celular y conecta VIA mediante coexistencia, si Meta habilita tu número.',
       hasWhatsAppBusiness: true,
     },
     {
@@ -4186,12 +4129,21 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
     },
   ];
   const [registrationPin, setRegistrationPin] = useState('');
+  const [phoneSelection, setPhoneSelection] = useState(null);
+  useEffect(() => { setRegistrationPin(''); setPhoneSelection(null); }, [tenant.id]);
+  async function connect(action = 'start', extra = {}) {
+    const result = await onAction(action, { registrationPin, ...extra });
+    if (result?.requiresPhoneSelection || result?.requiresCompletionRetry) setPhoneSelection({ ...result, tenantId: tenant.id });
+    else if (result) { setPhoneSelection(null); setRegistrationPin(''); }
+  }
   const currentPath = onboarding.setupPath;
   const connected = onboarding.status === 'connected';
   const testPilot = onboarding.testPilot ?? {};
-  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
+  const requiresRegistrationPin = currentPath === 'new_business';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
-  const platformBlock = onboarding.reason === 'meta_app_review_pending'
+  const platformBlock = onboarding.reason === 'meta_login_review_pending'
+    ? { title: 'Falta habilitar el acceso de clientes externos en Meta', detail: 'Los permisos de WhatsApp ya están aprobados. Ventas IA debe completar el acceso de Facebook Login para que puedas autorizar tu propio negocio. Tu tienda no tiene que solicitar este permiso.' }
+    : onboarding.reason === 'meta_app_review_pending'
     ? whatsappMetaReviewCopy(onboarding.platformReadiness?.appReviewStatus)
     : onboarding.reason === 'status_unavailable'
       ? {
@@ -4239,10 +4191,11 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         {paths.map((path) => (
           <button
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
-            disabled={busyAction === 'whatsapp-intent' || connected}
+            disabled={Boolean(busyAction) || connected}
             key={path.key}
             onClick={() => {
               setRegistrationPin('');
+              setPhoneSelection(null);
               onAction('intent', {
                 setupPath: path.key,
                 hasWhatsAppBusiness: path.hasWhatsAppBusiness,
@@ -4334,7 +4287,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
           </div>
           <div>
               <span>2</span>
-              <div><strong>Confirma el negocio y el número</strong><p>En la ventana de Meta inicia sesión, elige o crea tu negocio y recibe un código por SMS o llamada.</p></div>
+              <div><strong>Autoriza el negocio de tu tienda</strong><p>Tu acceso a Google en VIA no inicia sesión en Facebook. Meta necesita que una persona administradora autorice su negocio y número. “Centro de Innovación Visual” identifica al proveedor de VIA: elige el negocio de tu tienda, no el del proveedor.</p></div>
           </div>
           <div>
               <span>3</span>
@@ -4347,8 +4300,14 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-connected-summary">
               <CheckCircle2 size={20} />
               <div>
-                <strong>WhatsApp conectado</strong>
-                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
+                <strong>{onboarding.channelStatus === 'revoked' ? 'Meta retiró el acceso: renueva la autorización' : 'WhatsApp vinculado'}</strong>
+                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} quedó vinculado. Completa la prueba de recepción y respuesta para comprobar el canal.</p>
+                <p>{onboarding.token?.message ?? onboarding.token?.detail}</p>
+                <p>Los cargos de mensajería los factura Meta a tu negocio. VIA no ha verificado tu método de pago.</p>
+                <a href={onboarding.billing?.url ?? 'https://business.facebook.com/wa/manage/'} target="_blank" rel="noreferrer">Revisar cuenta y pagos en Meta</a>
+                {onboarding.sync?.required && <p>{onboarding.sync.error === 'whatsapp_sync_outcome_unknown' ? 'El canal está vinculado, pero falta confirmar si Meta recibió la solicitud de historial. Contacta a soporte de VIA para revisar los eventos antes de repetirla.' : onboarding.sync.error ? 'La sincronización inicial requiere un reintento.' : onboarding.sync.history === 'completed' ? 'Historial sincronizado.' : onboarding.sync.history === 'not_shared' ? 'Decidiste no compartir el historial. Puedes recibir mensajes nuevos.' : `Sincronización solicitada a Meta${onboarding.sync.progress ? `: ${onboarding.sync.progress}%` : ''}. Mantén abierta WhatsApp Business en el celular. El historial se importa solo si lo autorizaste.`}</p>}
+                {onboarding.sync?.error && onboarding.sync.error !== 'whatsapp_sync_outcome_unknown' && <button className="ghost-btn" disabled={Boolean(busyAction)} onClick={() => onAction('sync')} type="button">Reintentar sincronización</button>}
+                {onboarding.canAutomate && <button className="ghost-btn" disabled={Boolean(busyAction)} onClick={() => connect('renew')} type="button">Renovar autorización con Meta</button>}
                 {isPlatformAdmin && testPilot.eligible && testPilot.configured && (
                   <div className="whatsapp-pilot-refresh">
                     <p>Canal de evidencia de Meta. Si Meta rechaza un envío por token vencido, actualiza el token seguro en Render y renuévalo aquí.</p>
@@ -4369,7 +4328,8 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <>
               <div className="manual-guide">
                 <strong>Listo para conectar</strong>
-                <p>Al continuar se abrirá una ventana segura de Meta. Ten a mano el celular con tu número y el acceso al negocio. No tendrás que copiar tokens ni identificadores.</p>
+                <p>Vincularás el número con {tenant.name}. En Meta, verifica que el negocio y el número sean los tuyos antes de autorizar. Tu negocio conserva su administración y paga a Meta los mensajes que correspondan; la suscripción VIA se cobra por separado.</p>
+                {currentPath === 'business_app_existing' && <p>Ten abierta WhatsApp Business en el celular para vincularlo siguiendo las instrucciones de Meta. No borres ni desconectes tu cuenta para forzar el proceso. La disponibilidad depende de la elegibilidad de tu negocio.</p>}
               </div>
               {requiresRegistrationPin && (
                 <label className="whatsapp-pin-field">
@@ -4389,12 +4349,15 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <button
                 className="approve-btn whatsapp-connect-button"
                 disabled={!canStart || Boolean(busyAction)}
-                onClick={() => onAction('start', { registrationPin })}
+                onClick={() => connect()}
                 type="button"
               >
                 <Send size={16} />
                 Conectar con Meta
               </button>
+              {phoneSelection?.tenantId === tenant.id && (phoneSelection.requiresCompletionRetry
+                ? <div className="manual-guide"><p>La finalización no terminó. Puedes reintentar durante diez minutos sin repetir la autorización. Si Meta no llegó a entregar acceso, abre una conexión nueva.</p><button className="ghost-btn" type="button" disabled={Boolean(busyAction)} onClick={() => connect('complete', { attemptId: phoneSelection.attemptId })}>Reintentar finalización</button></div>
+                : <div className="manual-guide"><strong>Elige el número de esta tienda</strong><p>Meta autorizó varios números. Selecciona el que recibirá pedidos aquí.</p>{phoneSelection.phones.map(phone => <button className="ghost-btn" key={phone.id} type="button" disabled={Boolean(busyAction)} onClick={() => connect('complete', { attemptId: phoneSelection.attemptId, phoneNumberId: phone.id })}>{phone.displayPhoneNumber ?? phone.verifiedName ?? 'Número sin nombre'} {phone.verifiedName ?? ''}</button>)}</div>)}
             </>
           ) : (
             <div className="whatsapp-unavailable">
