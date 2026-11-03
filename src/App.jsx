@@ -3905,7 +3905,14 @@ function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsh
   async function importFile() {
     if (!csvText) return;
     const imported = await onImport('import', { csvText, fileName: file?.name });
-    if (imported) setResult(imported);
+    if (imported) setResult({
+      ...imported.validation,
+      ...imported,
+      valid: imported.status === 'imported',
+      canImport: false,
+      totalRows: imported.importedRows,
+      message: imported.status === 'imported' ? 'Los productos ya están guardados en Google Sheets de tu tienda.' : imported.message,
+    });
   }
 
   const validationErrors = result?.errors ?? [];
@@ -3937,7 +3944,7 @@ function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsh
       {(localError || error) && <p className="catalog-import-error"><AlertTriangle size={15} />{localError || error}</p>}
       {result && (
         <div className={`catalog-import-result ${result.valid ? 'is-valid' : 'is-invalid'}`}>
-          <strong>{result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
+          <strong>{result.status === 'imported' ? `${result.importedRows} productos importados` : result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
           <span>{result.message}</span>
           {result.valid && <small>{result.activeRows ?? result.totalRows} productos activos · {googleReady ? 'Google preparado' : 'Conecta Google para importarlo'}</small>}
           {validationErrors.slice(0, 4).map((item) => <small className="is-error" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
