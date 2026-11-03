@@ -3287,7 +3287,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
           ))}
         </div>
       </div>
-      {(error || notice) && (
+      {notice && (
         <div className={`queue-notice is-${notice.type}`} role={notice.type === 'error' ? 'alert' : 'status'}>
           {notice.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
           <span>{notice.text}</span>
