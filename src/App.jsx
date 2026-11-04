@@ -3098,7 +3098,11 @@ function conversationMessages(conversation) {
 }
 
 function whatsappHref(waId) {
-  const digits = String(waId ?? '').replace(/\D/g, '');
+  const value = String(waId ?? '').trim();
+  // Usernames/BSUIDs are not phone numbers: stripping their prefix can
+  // accidentally open a different recipient. Only build links for phones.
+  if (!/^\+?[\d\s()-]+$/.test(value)) return '';
+  const digits = value.replace(/\D/g, '');
   if (!digits) return '';
   return `https://wa.me/${digits}`;
 }
