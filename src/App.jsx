@@ -4,6 +4,7 @@ import LandingPage from './components/LandingPage.jsx';
 import { patchJson, postJson } from './core/api/client.js';
 import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
 import OrderProgressCard from './features/orders/OrderProgressCard.jsx';
+import ManualOrderDialog from './features/orders/ManualOrderDialog.jsx';
 import {
   Activity,
   AlertTriangle,
@@ -472,6 +473,7 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
   const [selectedOrderId, setSelectedOrderId] = useState('');
+  const [manualOrderTarget, setManualOrderTarget] = useState(null);
   const conversationSearchRef = useRef(null);
   const onboardingRedirectedTenantIds = useRef(new Set());
 
@@ -774,6 +776,18 @@ function App() {
     setQueueFocus(tab);
     setQueueNotice(null);
     setActiveView('approvals');
+  }
+
+  async function confirmManualOrder(conversationId, input) {
+    const requestedTenant = tenantId;
+    const result = await postJson(`/api/conversations/${encodeURIComponent(conversationId)}/manual-order`, input, { headers: csrfHeaders(auth), timeoutMs: 30000 });
+    if (activeTenantRef.current !== requestedTenant) return;
+    setOrders(current => [result.order, ...current.filter(order => order.id !== result.order.id)]);
+    setRequests(current => current.filter(request => request.conversationId !== conversationId));
+    setConversationList(current => current.map(conversation => conversation.id === conversationId ? { ...conversation, orderId: result.order.id, orderStatus: result.order.status } : conversation));
+    setManualOrderTarget(null);
+    setRefreshKey(value => value + 1);
+    openOrder(result.order.id);
   }
 
   function openOrder(orderId) {
@@ -1313,6 +1327,8 @@ function App() {
             onSelectConversation={openWhatsAppConversation}
             onDeleteConversation={deleteConversation}
             onOpenWhatsAppExternally={markManualWhatsApp}
+            onManualOrder={id => setManualOrderTarget({ id, tenantId })}
+            onOpenOrder={openOrder}
             onOpenApprovals={openApprovals}
             onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
             pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation?.id)}
@@ -1395,6 +1411,9 @@ function App() {
 
         {activeView === 'config' && <Configuration key={tenant.id} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
+      {manualOrderTarget?.tenantId === tenantId && <ManualOrderDialog key={manualOrderTarget.id}
+        conversationId={manualOrderTarget.id} onClose={() => setManualOrderTarget(null)} onSubmit={confirmManualOrder}
+        onOpenOrder={id => { setManualOrderTarget(null); openOrder(id); }} />}
     </main>
   );
 }
@@ -2733,6 +2752,8 @@ function UsageMeter({ label, used, limit, percent }) {
 }
 
 function ConversationsView({
+  onManualOrder,
+  onOpenOrder,
   backendStatus,
   conversations: conversationItems,
   detailCollapsed,
@@ -2871,6 +2892,8 @@ function ConversationsView({
         )}
         {activeWorkspaceTab === 'detail' && selectedConversation ? (
           <ConversationPanel
+            onManualOrder={onManualOrder}
+            onOpenOrder={onOpenOrder}
             conversation={selectedConversation}
             detailCollapsed={detailCollapsed}
             events={events}
@@ -2899,6 +2922,8 @@ function ConversationsView({
 }
 
 function ConversationPanel({
+  onManualOrder,
+  onOpenOrder,
   conversation,
   detailCollapsed = false,
   events,
@@ -3008,6 +3033,10 @@ function ConversationPanel({
         <span>{needsHuman ? 'Necesita atención' : 'Siguiente paso'}</span>
         <strong>{nextAction}</strong>
         <div className="button-row">
+          {!conversation.orderId && onManualOrder && (conversation.manualMode === 'whatsapp_external' || ['manual_active', 'blocked', 'approval_required', 'degraded'].includes(conversation.status) || conversation.closeReason === 'manual_inactivity') && (
+            <button className="approve-btn compact" type="button" onClick={() => onManualOrder(conversation.id)}><ShoppingBag size={16} />Confirmar y alistar pedido</button>
+          )}
+          {conversation.orderId && onOpenOrder && <button className="approve-btn compact" type="button" onClick={() => onOpenOrder(conversation.orderId)}><ShoppingBag size={16} />Ver pedido</button>}
           {needsHuman && onOpenApprovals && (
             <button className="approve-btn compact" type="button" onClick={onOpenApprovals}>
               <UserCheck size={16} />
