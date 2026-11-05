@@ -1391,6 +1391,7 @@ function App() {
             requests={visibleRequests}
             orders={visibleOrders}
             onAdvanceOrder={advanceOrder}
+            onManualOrder={id => setManualOrderTarget({ id, tenantId })}
             onOpenOrderWorkspace={id => setOrderWorkspaceTarget({ id, tenantId })}
             updatingOrderId={updatingOrderId}
             selectedOrderId={selectedOrderId}
@@ -3298,7 +3299,7 @@ function normalizeLabel(value = '') {
     .toLowerCase();
 }
 
-function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, onOpenOrderWorkspace, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
+function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onManualOrder, onResolve, onAdvanceOrder, onOpenOrderWorkspace, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
   const [activeQueueTab, setActiveQueueTab] = useState(focusTab);
   const selectedRequestRef = useRef(null);
   const queueRows = requests.map((request) => {
@@ -3406,6 +3407,15 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
         ))}
         {visibleQueueRows.map(({ request, conversation, view }) => {
           const isSelected = request.id === selectedRequestId;
+          const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
+          const hasOrderContext = Boolean(
+            request.action === 'prepare_delivery_order'
+            || (Array.isArray(snapshot.items) && snapshot.items.length)
+            || (Array.isArray(snapshot.orderItems) && snapshot.orderItems.length)
+            || (Array.isArray(snapshot.orderDraft?.items) && snapshot.orderDraft.items.length)
+            || /producto|pedido|domicilio|catalogo|catálogo|cotiz/i.test(`${request.title ?? ''} ${request.context ?? ''}`),
+          );
+          const canBuildManualOrder = Boolean(onManualOrder && conversation && !view.isDeliveryOrder && hasOrderContext);
           return (
             <article
               className={`request-card ${view.isDeliveryOrder ? 'is-delivery-order' : ''} ${isSelected ? 'is-selected' : ''}`}
@@ -3467,6 +3477,12 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                 </button>
                 <span>{view.waId || request.conversationId}</span>
               </div>
+              {canBuildManualOrder && (
+                <button className="approve-btn compact human-order-action" type="button" onClick={() => onManualOrder(request.conversationId)}>
+                  <ShoppingBag size={16} />
+                  Ver mensajes y armar pedido
+                </button>
+              )}
               {view.isDeliveryReview ? (
                 <DeliveryPolicyReviewForm
                   key={`${request.id}:${view.pricing?.draftVersion ?? ''}:${view.pricing?.policyRevision ?? ''}`}
