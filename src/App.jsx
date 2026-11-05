@@ -6,6 +6,7 @@ import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contr
 import PaymentNotices from './features/orders/PaymentNotices.jsx';
 import OrderProgressCard, { OrderPricingSummary } from './features/orders/OrderProgressCard.jsx';
 import ManualOrderDialog from './features/orders/ManualOrderDialog.jsx';
+import OrderWorkspace from './features/orders/OrderWorkspace.jsx';
 import {
   Activity,
   AlertTriangle,
@@ -476,6 +477,7 @@ function App() {
   const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
   const [selectedOrderId, setSelectedOrderId] = useState('');
   const [manualOrderTarget, setManualOrderTarget] = useState(null);
+  const [orderWorkspaceTarget, setOrderWorkspaceTarget] = useState(null);
   const conversationSearchRef = useRef(null);
   const onboardingRedirectedTenantIds = useRef(new Set());
 
@@ -794,11 +796,31 @@ function App() {
   }
 
   function openOrder(orderId) {
+    setOrderWorkspaceTarget({ id: orderId, tenantId });
     setSelectedHumanRequestId('');
     setSelectedOrderId(orderId);
     setQueueFocus('delivery');
     setQueueNotice(null);
     setActiveView('approvals');
+  }
+
+  function acceptOrderEdit(order) {
+    if (order.tenantId !== activeTenantRef.current) return;
+    setOrders(current => current.map(item => item.id === order.id ? order : item));
+    setRefreshKey(value => value + 1);
+  }
+
+  async function advanceWorkspaceOrder(order) {
+    const requestedTenant = tenantId;
+    const pending = visibleRequests.find(request => isDeliveryRequest(request) && deliveryRequestMatchesOrder(request, order));
+    if (order.status === 'pending_human_preparation' && pending) {
+      await postJson(`/api/pending-requests/${encodeURIComponent(pending.id)}/resolve`, { outcome: 'approved', responseMode: 'none' }, { headers: csrfHeaders(auth) });
+      if (activeTenantRef.current === requestedTenant) setRequests(current => current.filter(request => request.id !== pending.id));
+    } else {
+      const result = await patchJson(`/api/orders/${encodeURIComponent(order.id)}/status`, { status: order.status === 'preparing' ? 'dispatched' : 'preparing' }, { headers: csrfHeaders(auth) });
+      if (activeTenantRef.current === requestedTenant) setOrders(current => current.map(item => item.id === order.id ? result : item));
+    }
+    if (activeTenantRef.current === requestedTenant) setRefreshKey(value => value + 1);
   }
 
   function navigateToView(nextView) {
@@ -1369,6 +1391,7 @@ function App() {
             requests={visibleRequests}
             orders={visibleOrders}
             onAdvanceOrder={advanceOrder}
+            onOpenOrderWorkspace={id => setOrderWorkspaceTarget({ id, tenantId })}
             updatingOrderId={updatingOrderId}
             selectedOrderId={selectedOrderId}
             conversations={visibleConversations}
@@ -1426,6 +1449,10 @@ function App() {
 
         {activeView === 'config' && <Configuration key={tenant.id} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
+      {orderWorkspaceTarget?.tenantId === tenantId && <OrderWorkspace key={`${tenantId}:${orderWorkspaceTarget.id}`}
+        orderId={orderWorkspaceTarget.id} tenantId={tenantId} headers={csrfHeaders(auth)}
+        onClose={() => setOrderWorkspaceTarget(null)} onSaved={acceptOrderEdit} onAdvance={advanceWorkspaceOrder}
+        onOpenWhatsApp={conversation => { window.open(whatsappHref(conversation.waId), '_blank', 'noopener,noreferrer'); markManualWhatsApp(conversation.id); }} />}
       {manualOrderTarget?.tenantId === tenantId && <ManualOrderDialog key={manualOrderTarget.id}
         conversationId={manualOrderTarget.id} onClose={() => setManualOrderTarget(null)} onSubmit={confirmManualOrder}
         onOpenOrder={id => { setManualOrderTarget(null); openOrder(id); }} />}
@@ -3271,7 +3298,7 @@ function normalizeLabel(value = '') {
     .toLowerCase();
 }
 
-function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
+function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, onOpenOrderWorkspace, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
   const [activeQueueTab, setActiveQueueTab] = useState(focusTab);
   const selectedRequestRef = useRef(null);
   const queueRows = requests.map((request) => {
@@ -3372,6 +3399,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
             conversationAvailable={conversations.some((conversation) => conversation.id === order.conversationId)}
             onSelectConversation={onSelectConversation}
             onAdvance={onAdvanceOrder}
+            onOpenWorkspace={onOpenOrderWorkspace}
             busy={updatingOrderId === order.id}
             selected={selectedOrderId === order.id}
           />
@@ -3392,6 +3420,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                 <span className="request-kind">{view.task}</span>
               </div>
               <h3>{view.title}</h3>
+              {view.isDeliveryOrder && view.orderId && <button className="ghost-btn" type="button" onClick={() => onOpenOrderWorkspace(view.orderId)}><ShoppingBag size={17} />Ver pedido y conversación</button>}
               {view.isDeliveryOrder || view.isDeliveryReview ? (
                 <div className="delivery-brief">
                   {view.isDeliveryOrder && (

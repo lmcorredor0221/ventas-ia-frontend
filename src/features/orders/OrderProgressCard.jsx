@@ -2,7 +2,7 @@ import React from 'react';
 import { AlertTriangle, Check, CircleDollarSign, Clock3, Store, UserCheck } from 'lucide-react';
 import { ORDER_STAGE_LABELS, orderStageIndex, orderStatusLabel } from '../../domain/orders/status.js';
 
-export default function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, busy, selected }) {
+export default function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, onOpenWorkspace, busy, selected }) {
   const stageIndex = orderStageIndex(order.status);
   return (
     <article className={`request-card order-progress-card ${selected ? 'is-selected' : ''}`} data-order-id={order.id} tabIndex={selected ? -1 : undefined}>
@@ -37,6 +37,7 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
       </div>
       {order.sheetSyncStatus === 'pending' && <p className="order-sync-note"><AlertTriangle size={15} aria-hidden="true" /> El cambio quedó guardado aquí, pero la hoja de Google no estaba conectada. Revísala al reconectar.</p>}
       <div className="order-progress-actions">
+        {onOpenWorkspace && <button className="ghost-btn" type="button" onClick={() => onOpenWorkspace(order.id)}>Ver pedido y conversación</button>}
         {order.status === 'pending_human_preparation' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'preparing')}>{busy ? 'Guardando…' : 'Marcar tomado'}</button>}
         {order.status === 'preparing' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'dispatched')}>{busy ? 'Guardando…' : 'Marcar en camino'}</button>}
         {order.status === 'dispatched' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'delivered')}>{busy ? 'Guardando…' : 'Marcar entregado'}</button>}
