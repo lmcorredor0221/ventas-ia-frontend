@@ -28,6 +28,16 @@
 .manual-order-message strong { font-size: .78rem; color: #516154; }
 .manual-order-message span { white-space: pre-wrap; }
 .manual-order-dialog footer { flex-wrap: wrap; padding-top: 14px; }
+.manual-order-tabs { display: flex; gap: 8px; margin: 18px 0; padding: 4px; border-bottom: 1px solid #d6ded9; }
+.manual-order-tabs button { border: 0; border-bottom: 3px solid transparent; padding: 11px 14px; background: transparent; color: #516154; font: inherit; font-weight: 700; cursor: pointer; }
+.manual-order-tabs button.is-active { color: #174f35; border-bottom-color: #2b9b67; }
+.manual-order-totals { margin-top: 18px; padding: 12px 16px; border: 1px solid #dfe4e1; border-radius: 10px; background: #f7fbf8; }
+.manual-order-totals p { display: flex; justify-content: space-between; gap: 12px; margin: 6px 0; }
+.manual-order-grand-total { padding-top: 10px; border-top: 1px solid #dfe4e1; font-size: 1.12rem; }
+.manual-order-minimum-warning { display: grid; gap: 10px; margin: 16px 0; padding: 12px; border-radius: 10px; background: #fff5df; color: #6e4e17; }
+.manual-order-minimum-warning textarea { min-height: 72px; resize: vertical; }
+.manual-order-conversation-tab { min-height: 330px; }
+.manual-order-message time { color: #66736d; font-size: .75rem; }
 @media (max-width: 600px) {
   .manual-order-dialog { padding: 18px; }
   .manual-order-fields { grid-template-columns: 1fr; }
