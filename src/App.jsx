@@ -470,6 +470,8 @@ function App() {
   const [onboardingBusy, setOnboardingBusy] = useState('');
   const [onboardingError, setOnboardingError] = useState('');
   const [onboardingNotice, setOnboardingNotice] = useState(() => googleOAuthNotice(initialRouteQuery));
+  const [catalogSyncStatus, setCatalogSyncStatus] = useState(null);
+  const [catalogSyncError, setCatalogSyncError] = useState('');
   const [adminOverview, setAdminOverview] = useState(null);
   const [adminError, setAdminError] = useState('');
   const [billingStatus, setBillingStatus] = useState(null);
@@ -859,6 +861,30 @@ function App() {
     } catch (error) {
       if (error instanceof TypeError) setBackendStatus('offline');
       throw error;
+    }
+  }
+
+  async function syncCatalogOnDemand() {
+    setCatalogSyncError('');
+    setOnboardingBusy('catalog-sync');
+    try {
+      const response = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/catalog/sync`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? result.message ?? `Sincronización ${response.status}`);
+      setCatalogSyncStatus(result);
+      setBackendStatus('connected');
+      setRefreshKey((value) => value + 1);
+      return result;
+    } catch (error) {
+      setCatalogSyncError(error.message);
+      setBackendStatus((current) => (current === 'offline' ? current : 'connected'));
+      return null;
+    } finally {
+      setOnboardingBusy('');
     }
   }
 
@@ -1448,7 +1474,20 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration key={tenant.id} auth={auth} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && (
+          <Configuration
+            key={tenant.id}
+            auth={auth}
+            busyAction={onboardingBusy}
+            catalogSyncError={catalogSyncError}
+            catalogSyncStatus={catalogSyncStatus}
+            onNavigate={navigateToView}
+            onSaveConfig={updateTenantConfig}
+            onSyncCatalog={syncCatalogOnDemand}
+            tenant={tenant}
+            tools={toolList}
+          />
+        )}
       </section>
       {orderWorkspaceTarget?.tenantId === tenantId && <OrderWorkspace key={`${tenantId}:${orderWorkspaceTarget.id}`}
         orderId={orderWorkspaceTarget.id} tenantId={tenantId} headers={csrfHeaders(auth)}
@@ -6440,8 +6479,9 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
   );
 }
 
-function Configuration({ auth, onNavigate, onSaveConfig, tenant, tools: toolList }) {
+function Configuration({ auth, busyAction, catalogSyncError, catalogSyncStatus, onNavigate, onSaveConfig, onSyncCatalog, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
+  const [syncStatus, setSyncStatus] = useState(catalogSyncStatus ?? null);
   const [agentName, setAgentName] = useState(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
   const [agentNotice, setAgentNotice] = useState('');
   const [savingAgent, setSavingAgent] = useState(false);
@@ -6583,6 +6623,28 @@ function Configuration({ auth, onNavigate, onSaveConfig, tenant, tools: toolList
       setSavingReplySettings(false);
     }
   };
+  useEffect(() => {
+    setSyncStatus(catalogSyncStatus ?? null);
+  }, [catalogSyncStatus]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCatalogSyncStatus() {
+      try {
+        const response = await fetch(`/api/saas/tenants/${encodeURIComponent(tenant.id)}/google/catalog/sync/status`, { credentials: 'include' });
+        if (!response.ok) return;
+        const result = await response.json();
+        if (!cancelled) setSyncStatus(result);
+      } catch {
+        // El estado es complementario; la configuración sigue disponible si el endpoint no responde.
+      }
+    }
+    loadCatalogSyncStatus();
+    return () => { cancelled = true; };
+  }, [tenant.id]);
+  async function handleCatalogSync() {
+    const result = await onSyncCatalog?.();
+    if (result) setSyncStatus(result);
+  }
   const fields = [
     ['Identificador WhatsApp', 'WHATSAPP_PHONE_NUMBER_ID_REF', MessageCircle],
     ['Token de verificación', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', KeyRound],
@@ -6833,7 +6895,32 @@ function Configuration({ auth, onNavigate, onSaveConfig, tenant, tools: toolList
           </div>
           <button className="ghost-btn" type="button" disabled={googleRangesBusy} onClick={saveGoogleRanges}>
             {googleRangesBusy ? 'Guardando rangos…' : 'Guardar rangos'}
-          </button>
+           </button>
+          <div className="google-note">
+            <RefreshCw size={18} />
+            <div>
+              <strong>Catálogo operativo</strong>
+              <span>
+                {syncStatus?.inProgress
+                  ? 'Actualización en curso.'
+                  : syncStatus?.published?.catalogVersion
+                    ? `Versión ${syncStatus.published.catalogVersion} · ${syncStatus.published.rowCount ?? 0} productos · ${formatFullDateTime(syncStatus.published.syncedAt)}`
+                    : 'No hay una versión publicada para las búsquedas automáticas.'}
+              </span>
+              {(catalogSyncError || syncStatus?.lastResult?.status === 'failed') && (
+                <small className="catalog-import-error">{catalogSyncError || syncStatus.lastResult.error}</small>
+              )}
+            </div>
+            <button
+              className="ghost-btn"
+              disabled={Boolean(syncStatus?.inProgress) || busyAction === 'catalog-sync'}
+              onClick={handleCatalogSync}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              {busyAction === 'catalog-sync' ? 'Actualizando…' : 'Actualizar catálogo'}
+            </button>
+          </div>
           <details className="advanced-config">
             <summary>Ver referencias técnicas</summary>
           <div className="config-field-grid">
