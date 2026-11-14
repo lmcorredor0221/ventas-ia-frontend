@@ -4,6 +4,7 @@ import { ORDER_STAGE_LABELS, orderStageIndex, orderStatusLabel } from '../../dom
 
 export default function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, onOpenWorkspace, busy, selected }) {
   const stageIndex = orderStageIndex(order.status);
+  const waitingCustomerConfirmation = order?.customerReconfirmation?.status === 'required';
   return (
     <article className={`request-card order-progress-card ${selected ? 'is-selected' : ''}`} data-order-id={order.id} tabIndex={selected ? -1 : undefined}>
       <div className="request-top">
@@ -36,10 +37,11 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
         <InfoLine icon={UserCheck} label="Responsable" value="Tu tienda" />
       </div>
       {order.sheetSyncStatus === 'pending' && <p className="order-sync-note"><AlertTriangle size={15} aria-hidden="true" /> El cambio quedó guardado aquí, pero la hoja de Google no estaba conectada. Revísala al reconectar.</p>}
+      {waitingCustomerConfirmation && <p className="order-sync-note" role="status">El cliente debe confirmar el resumen actualizado antes de continuar con el alistamiento.</p>}
       <div className="order-progress-actions">
         {onOpenWorkspace && <button className="ghost-btn" type="button" onClick={() => onOpenWorkspace(order.id)}>Ver pedido y conversación</button>}
-        {order.status === 'pending_human_preparation' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'preparing')}>{busy ? 'Guardando…' : 'Marcar tomado'}</button>}
-        {order.status === 'preparing' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'dispatched')}>{busy ? 'Guardando…' : 'Marcar en camino'}</button>}
+        {order.status === 'pending_human_preparation' && <button className="approve-btn" type="button" disabled={busy || waitingCustomerConfirmation} onClick={() => onAdvance(order.id, 'preparing')}>{busy ? 'Guardando…' : waitingCustomerConfirmation ? 'Esperando confirmación' : 'Marcar tomado'}</button>}
+        {order.status === 'preparing' && <button className="approve-btn" type="button" disabled={busy || waitingCustomerConfirmation} onClick={() => onAdvance(order.id, 'dispatched')}>{busy ? 'Guardando…' : waitingCustomerConfirmation ? 'Esperando confirmación' : 'Marcar en camino'}</button>}
         {order.status === 'dispatched' && <button className="approve-btn" type="button" disabled={busy} onClick={() => onAdvance(order.id, 'delivered')}>{busy ? 'Guardando…' : 'Marcar entregado'}</button>}
         {conversationAvailable && <button className="text-btn" type="button" onClick={() => onSelectConversation(order.conversationId)}>Abrir conversación</button>}
       </div>

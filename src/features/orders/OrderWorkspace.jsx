@@ -194,6 +194,7 @@ export default function OrderWorkspace({ orderId, tenantId, headers, onClose, on
   };
   const products = (context?.products ?? []).filter(product => normal(`${product.name} ${product.presentation} ${product.normalizedPresentation} ${product.description} ${product.brand} ${product.category} ${product.productFamily} ${JSON.stringify(product.attributes ?? {})} ${JSON.stringify(product.tags ?? [])} ${product.sku}`).includes(normal(query))).slice(0, 20);
   const order = context?.order;
+  const changeSummary = order?.customerChangeSummary;
   const reviewLines = order?.manualProductReview?.lines ?? [];
   const pendingReviewLines = reviewLines.filter(line => ['pending', 'awaiting_customer'].includes(line.status));
   const waitingCustomerConfirmation = order?.customerReconfirmation?.status === 'required';
@@ -205,6 +206,22 @@ export default function OrderWorkspace({ orderId, tenantId, headers, onClose, on
     {error && <div className="ow-notice is-error" role="alert">{error} <button className="text-btn" type="button" disabled={busy} onClick={() => editing ? setDiscard('reload') : setRefresh(value => value + 1)}>Recargar pedido</button></div>}
     {notice && <p className="ow-notice" role="status">{notice}</p>}
     {context?.summaryNotification && summaryStatus[context.summaryNotification.status] && <p className="ow-notice" role="status">{summaryStatus[context.summaryNotification.status]}</p>}
+    {waitingCustomerConfirmation && <section className="ow-notice" aria-labelledby="ow-reconfirmation-title">
+      <strong id="ow-reconfirmation-title">Confirmación del cliente pendiente</strong>
+      <p>El pedido fue modificado y VIA envió el resumen actualizado por WhatsApp. No se puede iniciar el alistamiento hasta recibir la confirmación del cliente.</p>
+      {!!changeSummary?.itemChanges?.length && <ul>{changeSummary.itemChanges.map((change, index) => {
+        const before = change.before;
+        const after = change.after;
+        const name = after?.name ?? before?.name ?? 'Producto';
+        const description = change.type === 'added'
+          ? `Agregado: ${name}`
+          : change.type === 'removed'
+            ? `Retirado: ${name}`
+            : `Ajustado: ${name} (${money(before?.lineTotal)} → ${money(after?.lineTotal)})`;
+        return <li key={`${change.type}-${after?.sku ?? before?.sku ?? index}`}>{description}</li>;
+      })}</ul>}
+      {changeSummary && Number(changeSummary.previousTotal) !== Number(changeSummary.total) && <p>Total: {money(changeSummary.previousTotal)} → {money(changeSummary.total)}</p>}
+    </section>}
     {discard && <div className="ow-notice" role="alert"><p>Tienes una edición abierta. ¿Quieres descartar los cambios sin guardar?</p><button type="button" className="ghost-btn" onClick={() => setDiscard(false)}>Seguir editando</button><button type="button" className="deny-btn" onClick={() => { const reload = discard === 'reload'; setDiscard(false); if (reload) { setEditing(false); setRefresh(value => value + 1); } else onClose(); }}>Descartar cambios</button></div>}
     {loading ? <p className="ow-loading" role="status">Cargando pedido y conversación…</p> : context && <div className={`ow-columns ow-tab-${tab}`}>
       <section className="ow-order" aria-label="Detalle del pedido">
